@@ -6,12 +6,12 @@ from tqdm.notebook import tqdm
 import torch
 from pathlib import Path
 import matplotlib
-matplotlib.use('Agg')
+# matplotlib.use('Agg')
 import numpy as np
 import os
 # import tensorflow as tf
 import sys
-from shap_utils import *
+from shap_utils import error
 from Shapley import ModelWrapper
 from scipy.stats import spearmanr
 import shutil
@@ -57,12 +57,12 @@ class DShap(object):
         if seed is not None:
             np.random.seed(seed)
             torch.random.manual_seed(seed)
-            
+
         self.train_dataset = train_dataset
         self.test_dataset = test_dataset
         x_train, y_train = train_dataset.tensors
         x_test, y_test = test_dataset.tensors
-            
+
         # self.problem = problem
         # self.model_family = model_family
         self.metric = metric
@@ -73,11 +73,11 @@ class DShap(object):
             elif not self.directory.exists():
                 (self.directory / 'weights').mkdir(parents=True)
                 (self.directory / 'plots').mkdir(parents=True)
-                
+
         self.model = ModelWrapper(use_features=use_features, address=directory, **kwargs)
-    
+
         # self.model = return_model(self.model_family, **kwargs)
-        
+
         if sources is None:
             sources = {i:np.array([i]) for i in range(len(x_train))}
         elif not isinstance(sources, dict):
@@ -99,10 +99,10 @@ class DShap(object):
             # else:
                 # self.sample_weight = None
         else:
-            self.x_heldout = x_test[:-num_test]  # todo: replace with data sets
-            self.y_heldout = y_test[:-num_test]
-            self.x_test = x_test[-num_test:]
-            self.y_test = y_test[-num_test:]
+            self.x_test = x_test[num_test:]
+            self.y_test = y_test[num_test:]
+            self.x_heldout = x_test[-num_test:] 
+            self.y_heldout = y_test[-num_test:]
             self.x_train, self.y_train, self.sources = x_train, y_train, sources
             # self.sample_weight = sample_weight
             data_dic = {
@@ -120,7 +120,9 @@ class DShap(object):
                 
             pkl.dump(data_dic, open(data_dir, 'wb'))        
             
+        print('init score start')
         self.random_score = self.init_score(self.metric)
+        print('init score done')
             
         loo_dir = os.path.join(self.directory, 'loo.pkl')
         self.vals_loo = None
@@ -166,21 +168,21 @@ class DShap(object):
         g_number = str(np.max(g_nmbrs) + 1) if len(g_nmbrs) else '0' 
         return tmc_number, g_number
     
-    def init_score(self, metric):
+    def init_score(self, metric, samples=10):
         """ Gives the value of an initial untrained model."""
         if metric == 'accuracy':
             hist = np.bincount(self.y_test).astype(float)/len(self.y_test)
             return np.max(hist)
         if metric == 'f1':
             rnd_f1s = []
-            for _ in range(1000):
+            for _ in range(samples):
                 rnd_y = np.random.permutation(self.y_test)
                 rnd_f1s.append(f1_score(self.y_test, rnd_y))
             return np.mean(rnd_f1s)
         if metric == 'auc':
             return 0.5
         random_scores = []
-        for _ in range(100):
+        for _ in range(samples):
             rnd_y = np.random.permutation(self.y_train)
             # if self.sample_weight is None:
             self.model.fit(self.x_train, rnd_y)
@@ -221,11 +223,11 @@ class DShap(object):
             return my_xe_score(model, x, y)
         raise ValueError('Invalid metric!')
         
-    def run(self, save_every, err, tolerance=0.01, g_run=True, loo_run=True):
+    def run(self, save_every, err, tolerance=0.01, g_run=True, loo_run=True, max_iterations=None):
         """Calculates data sources(points) values.
         
         Args:
-            save_every: save marginal contrivbutions every n iterations.
+            save_every: save marginal contributions every n iterations.
             err: stopping criteria.
             tolerance: Truncation tolerance. If None, it's computed.
             g_run: If True, computes G-Shapley values.
@@ -239,29 +241,32 @@ class DShap(object):
                 self.save_results(overwrite=True)
                 
         print('LOO values calculated!')
+        count = 0
         tmc_run = True 
         # g_run = g_run and self.model_family in ['logistic', 'NN']
-        while tmc_run or g_run:
+        while tmc_run or g_run and (count < max_iterations if max_iterations is not None else True):
             if g_run:
-                print(self.mem_g)
                 if error(self.mem_g) < err:
                     g_run = False
                 else:
-                    self._g_shap(save_every, sources=self.sources)
+                    self._g_shap(iterations=save_every, sources=self.sources)
                     self.vals_g = np.mean(self.mem_g, 0)
+                print(self.mem_g)
             if tmc_run:
-                print(self.mem_tmc)
                 if error(self.mem_tmc) < err:
                     tmc_run = False
                 else:
                     self._tmc_shap(
-                        save_every, 
+                        iterations=save_every, 
                         tolerance=tolerance, 
                         sources=self.sources
                     )
                     self.vals_tmc = np.mean(self.mem_tmc, 0)
+                print(self.mem_tmc)
             if self.directory is not None:
                 self.save_results()
+                
+            count += 1
             
     def save_results(self, overwrite=False):
         """Saves results computed so far."""
@@ -283,7 +288,7 @@ class DShap(object):
         pkl.dump({'mem_g': self.mem_g, 'idxs_g': self.idxs_g}, 
                  open(g_dir, 'wb'))  
         
-    def _tmc_shap(self, iterations, tolerance=None, sources=None):
+    def _tmc_shap(self, iterations=None, tolerance=None, sources=None):
         """Runs TMC-Shapley algorithm.
         
         Args:
@@ -297,7 +302,7 @@ class DShap(object):
             sources = {i: np.array([i]) for i in range(len(self.x_train))}
         elif not isinstance(sources, dict):
             sources = {i: np.where(sources == i)[0] for i in set(sources)}
-        model = self.model
+        # model = self.model
         try:
             self.mean_score
         except:
@@ -322,7 +327,7 @@ class DShap(object):
                 np.reshape(idxs, (1,-1))
             ])
         
-    def _tol_mean_score(self):
+    def _tol_mean_score(self, samples=10):
         """Computes the average performance and its error using bagging."""
         scores = []
         self.restart_model()
@@ -332,7 +337,7 @@ class DShap(object):
         # else:
             # self.model.fit(self.x_train, self.y_train,
                           # sample_weight=self.sample_weight)
-        for _ in range(100):
+        for _ in range(samples):
             bag_idxs = np.random.choice(len(self.y_test), len(self.y_test))
             scores.append(self.value(
                 self.model, 
@@ -356,7 +361,7 @@ class DShap(object):
         # sample_weight_batch = np.zeros(0)
         truncation_counter = 0
         new_score = self.random_score
-        for n, idx in tqdm(enumerate(idxs), total=len(idxs)):
+        for i, idx in tqdm(enumerate(idxs), total=len(idxs)):
             old_score = new_score
             # x_batch = np.concatenate([x_batch, self.x_train[sources[idx]]])
             # y_batch = np.concatenate([y_batch, self.y_train[sources[idx]]])
@@ -386,6 +391,8 @@ class DShap(object):
             marginal_contribs[sources[idx]] = (new_score - old_score)
             marginal_contribs[sources[idx]] /= len(sources[idx])
             distance_to_full_score = np.abs(new_score - self.mean_score)
+            # if i % 10 == 0:
+                # print(distance_to_full_score, tolerance * self.mean_score)
             if distance_to_full_score <= tolerance * self.mean_score:
                 truncation_counter += 1
                 if truncation_counter > 5:
@@ -430,7 +437,7 @@ class DShap(object):
                 learning_rate = 10**(-i)
         return learning_rate
     
-    def _g_shap(self, iterations, err=None, learning_rate=None, sources=None):
+    def _g_shap(self, iterations=None, err=None, learning_rate=None, sources=None):
         """Method for running G-Shapley algorithm.
         
         Args:
@@ -479,6 +486,7 @@ class DShap(object):
                 [self.mem_g, np.reshape(individual_contribs, (1,-1))])
             self.idxs_g = np.concatenate(
                 [self.idxs_g, np.reshape(model.history['idxs'][0], (1,-1))])
+    
     
     def _calculate_loo_vals(self, sources=None, metric=None):
         """Calculated leave-one-out values for the given metric.
