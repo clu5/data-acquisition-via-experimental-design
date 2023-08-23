@@ -41,12 +41,13 @@ def get_data(
     data_dir,
     scale_data=False,
     num_image_features=100,
-    num_image_samples=10000,
+    num_image_samples=5000,
     cluster=False,
     random_seed=0,
+    num_validation=100,
 ):
     random_state = check_random_state(random_seed)
-    
+
     if dataset == "mnist":
         mnist_train = MNIST(root=data_dir, train=True)
         mnist_test = MNIST(root=data_dir, train=False)
@@ -70,26 +71,63 @@ def get_data(
         test_y = mnist_test.targets.float()
 
         M, D = dev_x.shape
-        random_samples = np.random.choice(np.arange(M), num_image_samples)
+        random_samples = np.random.choice(np.arange(M), num_image_samples * (2 if cluster else 1))
         random_features = np.random.choice(np.arange(D), num_image_features)
 
         dev_x = dev_x[:, random_features][random_samples]
         dev_y = dev_y[random_samples]
         test_x = test_x[:, random_features]
 
+        if scale_data:
+            MMS = MinMaxScaler()
+            dev_x = MMS.fit_transform(dev_x)
+            dev_y = MMS.fit_transform(dev_y[:, None]).flatten()
+            test_x = MMS.fit_transform(test_x)
+            test_y = MMS.fit_transform(test_y[:, None]).flatten()
+            print(f'{dev_x.sum()=}')
+            print(f'{test_x.sum()=}')
+
     else:
         if dataset == "synthetic":
-            x, y = make_regression(n_samples=1000, n_features=100, n_informative=100, random_state=random_state)
+            x, y = make_regression(
+                n_samples=1000,
+                n_features=30,
+                n_informative=5,
+                random_state=random_state,
+                noise=1,
+            )
         elif dataset == "diabetes":
             data = load_diabetes()
             x = data["data"]
             y = data["target"]
-            x = np.delete(x, 1, 1) # exclude binary feature to prevent singluar matrix
+            x = np.delete(x, 1, 1)  # exclude binary feature to prevent singluar matrix
         elif dataset == "housing":
-            column_names = ['CRIM', 'ZN', 'INDUS', 'CHAS', 'NOX', 'RM', 'AGE', 'DIS', 'RAD', 'TAX', 'PTRATIO', 'B', 'LSTAT', 'MEDV']
-            df = pd.read_csv(data_dir / "housing.csv", header=None, delimiter=r"\s+", names=column_names)
-            exclude = ['CHAS']
-            df = df.drop(columns=exclude) # exclude binary feature to prevent singluar matrix
+            column_names = [
+                "CRIM",
+                "ZN",
+                "INDUS",
+                "CHAS",
+                "NOX",
+                "RM",
+                "AGE",
+                "DIS",
+                "RAD",
+                "TAX",
+                "PTRATIO",
+                "B",
+                "LSTAT",
+                "MEDV",
+            ]
+            df = pd.read_csv(
+                data_dir / "housing.csv",
+                header=None,
+                delimiter=r"\s+",
+                names=column_names,
+            )
+            exclude = ["CHAS"]
+            df = df.drop(
+                columns=exclude
+            )  # exclude binary feature to prevent singluar matrix
             x = df.iloc[:, :12].values
             y = df.MEDV.values
         elif dataset == "wine":
@@ -104,7 +142,7 @@ def get_data(
             x = df.iloc[:, :10].values
             y = df.area.values
         else:
-            raise ValueError(f'{dataset} not found')
+            raise ValueError(f"{dataset} not found")
 
         if scale_data:
             MMS = MinMaxScaler()
@@ -119,16 +157,18 @@ def get_data(
         )
 
     if cluster:
-        KM = KMeans(n_clusters=2, init="k-means++")
-        cluster_mask = KM.fit(dev_x).labels_
+        KM = KMeans(n_clusters=3, init="k-means++")
+        KM.fit(np.concatenate([dev_x, test_x]))
+        cluster_mask = KM.labels_
 
-        train_x = dev_x[cluster_mask == 0]
-        train_y = dev_y[cluster_mask == 0]
+        val_mask = (KM.predict(dev_x) == 0)
+        val_x = dev_x[val_mask]
+        val_y = dev_y[val_mask]
 
-        val_x = dev_x[cluster_mask == 1]
-        val_y = dev_y[cluster_mask == 1]
+        train_x = dev_x[~val_mask]
+        train_y = dev_y[~val_mask]
 
-        test_mask = KM.predict(test_x) == 0
+        test_mask = KM.predict(test_x) == 1
         test_x = test_x[test_mask]
         test_y = test_y[test_mask]
 
@@ -139,10 +179,10 @@ def get_data(
             test_size=0.2,
             random_state=random_state,
         )
-        
-    val_x = val_x[:args.num_validation]
-    val_y = val_y[:args.num_validation]
-    
+
+    val_x = val_x[:num_validation]
+    val_y = val_y[:num_validation]
+
     return (
         train_x,
         train_y,
@@ -161,30 +201,72 @@ def get_values(
     test_x,
     test_y,
     metric=mean_squared_error,
-    random_state=None,
+    random_state=0,
 ):
     fetcher = DataFetcher.from_data_splits(
         train_x, train_y, val_x, val_y, test_x, test_y, one_hot=False
     )
     model = RegressionSkLearnWrapper(LinearRegression)
 
-    ame_values = AME().train(fetcher=fetcher, pred_model=model).data_values
-    banz_values = DataBanzhaf().train(fetcher=fetcher, pred_model=model).data_values
-    oob_values = DataOob().train(fetcher=fetcher, pred_model=model).data_values
-    shap_values = DataShapley().train(fetcher=fetcher, pred_model=model).data_values
-    beta_values = BetaShapley().train(fetcher=fetcher, pred_model=model).data_values
-    loo_values = LeaveOneOut().train(fetcher=fetcher, pred_model=model).data_values
-    dvrl_values = DVRL().train(fetcher=fetcher, pred_model=model).data_values
-    lava_values = LavaEvaluator().train(fetcher=fetcher, pred_model=model).data_values
-    influence_values = (
-        InfluenceFunctionEval().train(fetcher=fetcher, pred_model=model).data_values
+    ame_values = (
+        AME(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
     )
-    knn_values = KNNShapley().train(fetcher=fetcher, pred_model=model).data_values
+    banz_values = (
+        DataBanzhaf(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
+    )
+    oob_values = (
+        DataOob(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
+    )
+    shap_values = (
+        DataShapley(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
+    )
+    beta_values = (
+        BetaShapley(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
+    )
+    loo_values = (
+        LeaveOneOut(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
+    )
+    dvrl_values = (
+        DVRL(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
+    )
+    lava_values = (
+        LavaEvaluator(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
+    )
+    influence_values = (
+        InfluenceFunctionEval(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
+    )
+    knn_values = (
+        KNNShapley(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
+    )
     robust_values = (
-        RobustVolumeShapley().train(fetcher=fetcher, pred_model=model).data_values
+        RobustVolumeShapley(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
     )
     random_values = (
-        RandomEvaluator().train(fetcher=fetcher, pred_model=model).data_values
+        RandomEvaluator(random_state=random_state)
+        .train(fetcher=fetcher, pred_model=model)
+        .data_values
     )
 
     return {
@@ -223,10 +305,10 @@ def evaluate_subset(train_values, train_x, train_y, test_x, test_y, k=10):
 
 
 def main(args):
+    np.random.seed(args.seed)
     results_dir = Path(args.results_dir)
     results_dir.mkdir(exist_ok=True)
-    figures_dir = Path(args.figures_dir)
-    print(args.dataset.center(40, '='))
+    print(args.dataset.center(40, "="))
 
     data_dir = Path(args.data_dir)
     (
@@ -237,32 +319,44 @@ def main(args):
         test_x,
         test_y,
     ) = get_data(
-        args.dataset, data_dir, cluster=args.cluster, scale_data=args.scale_data
+        args.dataset,
+        data_dir,
+        cluster=args.cluster,
+        scale_data=args.scale_data,
+        random_seed=args.seed,
+        num_validation=args.num_validation,
     )
-    print(f'{train_x.shape=}')
-    print(f'{val_x.shape=}')
-    print(f'{test_x.shape=}')
+    print(f"{train_x.shape=}")
+    print(f"{val_x.shape=}")
+    print(f"{test_x.shape=}")
 
     # other data valuation baselines
-    values = get_values(train_x, train_y, val_x, val_y, test_x, test_y)
+    values = get_values(
+        train_x,
+        train_y,
+        val_x,
+        val_y,
+        test_x,
+        test_y,
+        random_state=args.seed,
+    )
 
     # our method (experimental design)
     V = Valuator()
     for num_buyer in args.num_buyers:
-        design_values = V.optimize(test_x[: num_buyer], train_x)
+        design_values = V.optimize(test_x[:num_buyer], train_x)
         values[f"Design-{num_buyer}"] = design_values
 
-    with open(
-        results_dir
-        / f"values-{args.dataset}-{'non-iid' if args.cluster else 'iid'}.json",
-        "w",
-    ) as f:
-        json.dump({k: np.asarray(v).tolist() for k, v in values.items()}, f, default=float, indent=4)
-
     num_features = train_x.shape[1]
-    subsets = list(
-        range(num_features, train_x.shape[0], 50 if args.dataset == "mnist" else 5)
-    )
+
+    if args.dataset == "mnist":
+        subsets = list(range(num_features, 200, 5))
+    elif args.dataset == "synthetic":
+        subsets = list(range(num_features, train_x.shape[0], 1))
+    else:
+        subsets = list(range(num_features, train_x.shape[0], 5))
+
+
     errors = {}
     for k, v in values.items():
         errors[k] = {
@@ -273,21 +367,40 @@ def main(args):
     # validation set baseline
     num_val = val_x.shape[0]
     val_values = np.random.permutation(num_val)  # dummy values
-    errors['Validation baseline'] = {s: evaluate_subset(val_values, val_x, val_y, test_x, test_y, k=s) for s in range(num_features, num_val)}
+    errors["Validation baseline"] = {
+        s: evaluate_subset(val_values, val_x, val_y, test_x, test_y, k=s)
+        for s in range(num_features, num_val)
+    }
 
     # test set baseline
     num_test = test_x.shape[0]
     test_values = np.random.permutation(num_test)  # dummy values
-    errors['Test baseline'] = {s: evaluate_subset(test_values, test_x, test_y, test_x, test_y, k=s) for s in range(num_features, num_test)}
+    errors["Test baseline"] = {
+        s: evaluate_subset(test_values, test_x, test_y, test_x, test_y, k=s)
+        for s in range(num_features, num_test)
+    }
 
     with open(
         results_dir
-        / f"errors-{args.dataset}-{'non-iid' if args.cluster else 'iid'}.json",
+        / f"values-{args.dataset}-{'non-iid' if args.cluster else 'iid'}-{args.seed}.json",
+        "w",
+    ) as f:
+        json.dump(
+            {k: np.asarray(v).tolist() for k, v in values.items()},
+            f,
+            default=float,
+            indent=4,
+        )
+
+    with open(
+        results_dir
+        / f"errors-{args.dataset}-{'non-iid' if args.cluster else 'iid'}-{args.seed}.json",
         "w",
     ) as f:
         json.dump(errors, f, default=float, indent=4)
 
-    print('experiment completed'.center(40, '='))
+    print(f"{args.dataset} completed".center(40, "="))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -297,8 +410,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dataset", default="diabetes")
     parser.add_argument("--data_dir", default="../data")
-    parser.add_argument("--figures_dir", default="figures")
-    parser.add_argument("--results_dir", default="results")
+    parser.add_argument("--results_dir", default="new_results")
     parser.add_argument(
         "--cluster", action="store_true", help="use non IID validation set"
     )
@@ -306,26 +418,30 @@ if __name__ == "__main__":
     parser.add_argument(
         "-nb",
         "--num_buyers",
+        nargs='+',
         default=[1, 5, 25, 50],
         type=list,
         help="number of buyer points used in experimental design",
     )
-    parser.add_argument(
-        "-nt",
-        "--num_train",
-        default=10000,
-        help="number of training points used in valuation",
-    )
+    # parser.add_argument(
+    #     "-nt",
+    #     "--num_train",
+    #     default=10000,
+    #     help="number of training points used in valuation",
+    # )
     parser.add_argument(
         "-nv",
         "--num_validation",
-        default=100,
+        default=50,
+        type=int,
         help="number of validation points used in valuation",
     )
     parser.add_argument(
-        "--random_seed",
-        default=0,
-        help="set random seed for reproducability",
+        "-s",
+        "--seed",
+        default=1,
+        type=int,
+        help="random seed",
     )
     parser.add_argument("-d", "--debug", action="store_true")
     args = parser.parse_args()

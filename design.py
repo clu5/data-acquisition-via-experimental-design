@@ -28,8 +28,8 @@ class Valuator:
         def objective(buyer_data, seller_data, seller_weights):
             m = buyer_data.shape[0]
             W = cp.diag(seller_weights)
-            cost = cp.matrix_frac(buyer_data.T, (seller_data.T @ W @ seller_data) ) / m
-            return cost
+            cost = cp.matrix_frac(buyer_data.T, (seller_data.T @ W @ seller_data) )
+            return cost / m
 
         seller_weights = cp.Variable(seller_data.shape[0])
         constraints = [seller_weights >= 0, sum(seller_weights) == 1]
