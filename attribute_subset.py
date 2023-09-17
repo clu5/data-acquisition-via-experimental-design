@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import os
+import sys
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 from collections import defaultdict
@@ -21,7 +22,6 @@ from opendataval.dataval import (AME, DVRL, BetaShapley, DataBanzhaf, DataOob,
                                  RandomEvaluator, RobustVolumeShapley)
 from opendataval.model import RegressionSkLearnWrapper
 from PIL import Image
-from sklearn.cluster import KMeans
 from sklearn.datasets import load_diabetes, make_regression
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
@@ -41,13 +41,14 @@ from design import Valuator
 def get_data(
     dataset,
     data_dir,
-    scale_data=True,
+    scale_data=False,
     num_image_features=30,
     num_image_samples=1000,
-    cluster=False,
     random_seed=0,
     num_validation=100,
     test_frac=0.5,
+    num_sellers=10,
+    attributes_per_buyer=[1, 2, 3, 4],
 ):
     random_state = check_random_state(random_seed)
 
@@ -73,17 +74,8 @@ def get_data(
         random_features = np.random.choice(np.arange(D), num_image_features)
 
         x = x[:, random_features]
-        # x = x[:, random_features][random_samples]
+        #x = x[:, random_features][random_samples]
         # y = y[random_samples]
-
-        # if scale_data:
-        #     MMS = MinMaxScaler()
-        #     dev_x = MMS.fit_transform(dev_x)
-        #     dev_y = MMS.fit_transform(dev_y[:, None]).flatten()
-        #     test_x = MMS.fit_transform(test_x)
-        #     test_y = MMS.fit_transform(test_y[:, None]).flatten()
-        #     print(f'{dev_x.sum()=}')
-        #     print(f'{test_x.sum()=}')
 
     elif dataset == "bone-age":
         if (data_dir / "bone-age-resnet50-features.pt").exists():
@@ -196,68 +188,90 @@ def get_data(
     x = torch.tensor(x).float()
     y = torch.tensor(y).float()
 
-    if cluster:
-        KM = KMeans(n_clusters=3, init="k-means++")
-        KM.fit(x)
-        cluster_indices = KM.labels_
+    # estimate global coefficients
+    LR = LinearRegression()
+    LR.fit(x, y)
 
-        cluster_1 = cluster_indices == 0
-        cluster_2 = cluster_indices == 1
-        cluster_3 = cluster_indices == 2
+    # coefficients
+    m = LR.coef_
 
-        x3_train, x3_test, y3_train, y3_test = train_test_split(
-            x[cluster_3],
-            y[cluster_3],
-            test_size=test_frac,
-            random_state=random_state,
-        )
+    # bias
+    b = LR.intercept_
 
-        x2_train, x2_val, y2_train, y2_val = train_test_split(
-            x[cluster_2],
-            y[cluster_2],
-            test_size=num_validation / x[cluster_2].shape[0],
-            random_state=random_state,
-        )
-
-        train_x = torch.cat([x[cluster_1], x2_train, x3_train])
-        train_y = torch.cat([y[cluster_1], y2_train, y3_train])
-
-        val_x = x2_val
-        val_y = y2_val
-
-        test_x = x3_test
-        test_y = y3_test
-
-    else:
-        dev_x, test_x, dev_y, test_y = train_test_split(
-            x,
-            y,
-            test_size=test_frac,
-            random_state=random_state,
-        )
-
-        train_x, val_x, train_y, val_y = train_test_split(
-            dev_x,
-            dev_y,
-            test_size=num_validation / dev_x.shape[0],
-            random_state=random_state,
-        )
-
-    # val_x = val_x[:num_validation]
-    # val_y = val_y[:num_validation]
-    # print('split data')
-    # print(f'{train_x.shape=}')
-    # print(f'{val_x.shape=}')
-    # print(f'{test_x.shape=}')
-
-    return (
-        train_x,
-        train_y,
-        val_x,
-        val_y,
-        test_x,
-        test_y,
+    dev_x, test_x = train_test_split(
+        x,
+        test_size=test_frac,
+        random_state=random_state,
     )
+
+    train_x, val_x = train_test_split(
+        dev_x,
+        test_size=num_validation / dev_x.shape[0],
+        random_state=random_state,
+    )
+
+    # number of total attributes
+    M = train_x.shape[1]
+
+    # number of attributes per seller
+    M_i = max(1, M // num_sellers)
+
+    # number of total samples
+    N = train_x.shape[0]
+
+    # number of samples per seller
+    N_i = N // num_sellers
+
+    print(
+        f"{train_x.shape=}",
+        f"{num_sellers=}",
+        f"{M=}",
+        f"{M_i=}",
+        f"{N=}",
+        f"{N_i=}",
+        sep="\n",
+    )
+
+    pad = lambda x, padding: torch.nn.functional.pad(
+        torch.tensor(x).float(), padding, "constant", 0
+    )
+
+    seller_x = torch.cat(
+        [
+            pad(
+                train_x[N_i * i : N_i * (i + 1), M_i * i : M_i * (i + 1)],
+                [M_i * i, M - (M_i * (i + 1))],
+            )
+            for i in range(num_sellers)
+        ]
+    ).float()
+
+    # add remaining attributes
+    if num_sellers * M_i < M:
+        r = M - num_sellers * M_i
+        seller_x = torch.cat([seller_x, pad(train_x[-N_i:, -r:], (M - r, 0))])
+
+    assert seller_x.mean(0).all(), "found zeros in seller matrix"
+
+    seller_y = torch.tensor(seller_x @ m + b).float()
+
+    buyer_xs = {}
+    buyer_ys = {}
+
+    for j, num_attributes in enumerate(attributes_per_buyer):
+        k = f"buyer_{j}"
+        buyer_xs[k] = pad(test_x[:, :num_attributes], [0, M - num_attributes])
+        buyer_ys[k] = torch.tensor(buyer_xs[k] @ m + b).float()
+
+    val_xs = {}
+    val_ys = {}
+
+    for j, num_attributes in enumerate(attributes_per_buyer):
+        k = f"val_{j}"
+        val_xs[k] = pad(val_x[:, :num_attributes], [0, M - num_attributes])
+        val_ys[k] = torch.tensor(val_xs[k] @ m + b).float()
+
+    return seller_x.float(), seller_y.float(), val_xs, val_ys, buyer_xs, buyer_ys
 
 
 def get_values(
@@ -275,61 +289,73 @@ def get_values(
     )
     model = RegressionSkLearnWrapper(LinearRegression)
 
+    print("AME")
     ame_values = (
         AME(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("BANZHAF")
     banz_values = (
         DataBanzhaf(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("OOB")
     oob_values = (
         DataOob(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("SHAP")
     shap_values = (
         DataShapley(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("BETA")
     beta_values = (
         BetaShapley(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("LOO")
     loo_values = (
         LeaveOneOut(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("DVRL")
     dvrl_values = (
         DVRL(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("LAVA")
     lava_values = (
         LavaEvaluator(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("INFLUENCE")
     influence_values = (
         InfluenceFunctionEval(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("KNN")
     knn_values = (
         KNNShapley(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("ROBUST")
     robust_values = (
         RobustVolumeShapley(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
         .data_values
     )
+    print("RANDOM")
     random_values = (
         RandomEvaluator(random_state=random_state)
         .train(fetcher=fetcher, pred_model=model)
@@ -379,114 +405,132 @@ def main(args):
 
     data_dir = Path(args.data_dir)
     (
-        train_x,
-        train_y,
-        val_x,
-        val_y,
-        test_x,
-        test_y,
+        seller_x,
+        seller_y,
+        val_xs,
+        val_ys,
+        buyer_xs,
+        buyer_ys,
     ) = get_data(
         args.dataset,
         data_dir,
-        cluster=args.cluster,
         scale_data=args.scale_data,
         random_seed=args.seed,
         num_validation=args.num_validation,
+        test_frac=args.test_frac,
+        num_sellers=args.num_sellers,
+        attributes_per_buyer=args.attributes_per_buyer,
     )
     print(f"{args.dataset} loaded".center(40, "-"))
-    print(f"{train_x.shape=}")
-    print(f"{val_x.shape=}")
-    print(f"{test_x.shape=}")
+    print(f"{seller_x.shape=}")
+    print(f"{buyer_xs['buyer_0'].shape=}")
+    print(f"{val_xs['val_0'].shape=}")
 
-    # our method (experimental design)
-    design_values = {}
-    V = Valuator()
-    for num_buyer in tqdm(args.num_buyers):
-        print(num_buyer, f"{test_x[:num_buyer].shape=}", f"seller={train_x.shape}")
-        design_values[f"Design-{num_buyer}"] = V.optimize(test_x[:num_buyer], train_x)
+    for buyer, num_attributes in tqdm(enumerate(args.attributes_per_buyer)):
+        print(f"{buyer=} {num_attributes}".center(40, "-"))
+        vk = f"val_{buyer}"
+        bk = f"buyer_{buyer}"
 
-    print(f"starting valuations".center(40, "-"))
-    # other data valuation baselines
-    values = get_values(
-        train_x,
-        train_y,
-        val_x,
-        val_y,
-        test_x,
-        test_y,
-        random_state=args.seed,
-    )
-    print(f"finished valuations".center(40, "-"))
+        # our method (experimental design)
+        condition_number = np.linalg.cond(seller_x.T @ seller_x)
+        print(f"{condition_number=}")
+        assert (
+            condition_number < 1 / sys.float_info.epsilon
+        ), f"matrix is singular: {condition_number=}\n{seller_x.mean(0)}\n{seller_x}"
+        design_values = {}
+        V = Valuator()
+        for num_buyer in tqdm(args.num_buyers):
+            print(
+                num_buyer,
+                f"{buyer_xs[bk][:num_buyer].shape=}",
+                f"seller={seller_x.shape}",
+            )
+            buyer_data = buyer_xs[f"buyer_{buyer}"][:num_buyer]
+            design_values[f"optimal design w/ {num_buyer}"] = V.optimize(
+                buyer_data, seller_x
+            )
 
-    for k, v in design_values.items():
-        values[k] = v
+        # other data valuation baselines
+        values = get_values(
+            seller_x,
+            seller_y,
+            val_xs[vk],
+            val_ys[vk],
+            buyer_xs[bk],
+            buyer_ys[bk],
+            random_state=args.seed,
+        )
+        print(f"finished valuations".center(40, "-"))
+        for k, v in design_values.items():
+            values[k] = v
 
-    num_features = train_x.shape[1]
+        num_features = seller_x.shape[1]
 
-    if args.dataset in ("mnist", "bone-age"):
-        subsets = list(range(num_features, 200, 5))
-    elif args.dataset == "synthetic":
-        subsets = list(range(num_features, train_x.shape[0], 1))
-    else:
-        subsets = list(range(num_features, train_x.shape[0], 5))
+        if args.dataset in ("mnist", "bone-age"):
+            subsets = list(range(num_features, 200, 5))
+        elif args.dataset == "synthetic":
+            subsets = list(range(num_features, seller_x.shape[0], 1))
+        else:
+            subsets = list(range(num_features, seller_x.shape[0], 5))
 
-    errors = {}
-    for k, v in values.items():
-        errors[k] = {
-            s: evaluate_subset(v, train_x, train_y, test_x, test_y, k=s)
-            for s in subsets
+        errors = {}
+        for k, v in values.items():
+            errors[k] = {
+                s: evaluate_subset(
+                    v, seller_x, seller_y, buyer_xs[bk], buyer_ys[bk], k=s
+                )
+                for s in subsets
+            }
+
+        # validation set baseline
+        num_val = val_xs[vk].shape[0]
+        val_values = np.random.permutation(num_val)  # dummy values
+        errors["Validation baseline"] = {
+            s: evaluate_subset(
+                val_values, val_xs[vk], val_ys[vk], buyer_xs[bk], buyer_ys[bk], k=s
+            )
+            for s in range(num_features, num_val)
         }
 
-    # validation set baseline
-    num_val = val_x.shape[0]
-    val_values = np.random.permutation(num_val)  # dummy values
-    errors["Validation baseline"] = {
-        s: evaluate_subset(val_values, val_x, val_y, test_x, test_y, k=s)
-        for s in range(num_features, num_val)
-    }
+        # test set baseline
+        num_test = buyer_xs[bk].shape[0]
+        test_values = np.random.permutation(num_test)  # dummy values
+        errors["Test baseline"] = {
+            s: evaluate_subset(
+                test_values, buyer_xs[bk], buyer_ys[bk], buyer_xs[bk], buyer_ys[bk], k=s
+            )
+            for s in range(num_features, num_test)
+        }
 
-    # test set baseline
-    num_test = test_x.shape[0]
-    test_values = np.random.permutation(num_test)  # dummy values
-    errors["Test baseline"] = {
-        s: evaluate_subset(test_values, test_x, test_y, test_x, test_y, k=s)
-        for s in range(num_features, num_test)
-    }
+        with open(
+            results_dir / f"{args.dataset}-{buyer=}-attribute-values-{args.seed}.json",
+            "w",
+        ) as f:
+            json.dump(
+                {k: np.asarray(v).tolist() for k, v in values.items()},
+                f,
+                default=float,
+                indent=4,
+            )
 
-    with open(
-        results_dir
-        / f"values-{args.dataset}-{'non-iid' if args.cluster else 'iid'}-{args.seed}.json",
-        "w",
-    ) as f:
-        json.dump(
-            {k: np.asarray(v).tolist() for k, v in values.items()},
-            f,
-            default=float,
-            indent=4,
-        )
+        with open(
+            results_dir / f"{args.dataset}-{buyer=}-attribute-errors-{args.seed}.json",
+            "w",
+        ) as f:
+            json.dump(errors, f, default=float, indent=4)
 
-    with open(
-        results_dir
-        / f"errors-{args.dataset}-{'non-iid' if args.cluster else 'iid'}-{args.seed}.json",
-        "w",
-    ) as f:
-        json.dump(errors, f, default=float, indent=4)
-
-    print(f"{args.dataset} completed".center(40, "="))
+    print(f"experiment for {args.dataset} complete :)".center(40, "="))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        prog="compare_valutions.py",
-        description="Runs data valuation experiment",
-        epilog="Compare data valuation methods",
+        prog="attribute_subset.py",
+        description="Runs attribute subset experiment",
+        epilog="Compare data valuation methods for seller selection",
     )
     parser.add_argument("--dataset", default="diabetes")
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--results_dir", default="results")
-    parser.add_argument(
-        "--cluster", action="store_true", help="use non IID validation set"
-    )
     parser.add_argument("--scale_data", action="store_true", help="standardize data")
     parser.add_argument(
         "-nb",
@@ -496,16 +540,10 @@ if __name__ == "__main__":
         type=list,
         help="number of buyer points used in experimental design",
     )
-    # parser.add_argument(
-    #     "-nt",
-    #     "--num_train",
-    #     default=10000,
-    #     help="number of training points used in valuation",
-    # )
     parser.add_argument(
         "-nv",
         "--num_validation",
-        default=100,
+        default=50,
         type=int,
         help="number of validation points used in valuation",
     )
@@ -515,6 +553,27 @@ if __name__ == "__main__":
         default=1,
         type=int,
         help="random seed",
+    )
+    parser.add_argument(
+        "-t",
+        "--test_frac",
+        default=0.5,
+        type=float,
+        help="fraction of data to use for testing",
+    )
+    parser.add_argument(
+        "-ns",
+        "--num_sellers",
+        default=5,
+        type=int,
+        help="number of sellers to partition attributes between (splits evenly)",
+    )
+    parser.add_argument(
+        "--attributes_per_buyer",
+        nargs="+",
+        default=[1, 2, 3],
+        type=list,
+        help="multiplier for number of attributes each buyer has",
     )
     parser.add_argument("-d", "--debug", action="store_true")
     args = parser.parse_args()

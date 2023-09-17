@@ -1,4 +1,6 @@
 jupyterlab==3.6.5
+scipy
+scikit-learn
 tqdm
 cvxpy
 opendataval
