@@ -24,7 +24,7 @@ from opendataval.model import RegressionSkLearnWrapper
 from PIL import Image
 from sklearn.cluster import KMeans
 from sklearn.datasets import load_diabetes, make_regression
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import NearestNeighbors
@@ -45,9 +45,14 @@ def get_data(
     random_seed=0,
     num_seller=10000,
     num_buyer=1000,
+    num_val=1000,
     dim=1000,
     noise_level=10,
     val_split=0.1,
+    buyer_subset=False,
+    seller_subset=False,
+    return_beta=False,
+    exponential=False,
 ):
     random_state = check_random_state(random_seed)
 
@@ -62,7 +67,10 @@ def get_data(
     y_sell = X_sell @ beta_true + noise_level * np.random.randn(num_seller)
 
     # Generate some random buyer data
-    X_buy = np.random.normal(size=[num_buyer, dim])
+    if exponential:
+        X_buy = np.random.exponential(size=[num_buyer, dim])
+    else:
+        X_buy = np.random.normal(size=[num_buyer, dim])
     X_buy /= np.linalg.norm(X_buy, axis=1, keepdims=True)  # normalize data
     y_buy = X_buy @ beta_true
 
@@ -74,36 +82,24 @@ def get_data(
         y_buy = MMS.fit_transform(y_buy)
 
     if cluster:
-        KM = KMeans(n_clusters=3, init="k-means++")
+        n_clusters = 5
+        KM = KMeans(n_clusters=n_clusters, init="k-means++")
         KM.fit(X_buy)
-        cluster_indices = KM.labels_
+        buyer_clusters = KM.labels_
 
-        cluster_1 = cluster_indices == 0
-        cluster_2 = cluster_indices == 1
-        cluster_3 = cluster_indices == 2
+        X_buy = X_buy[buyer_clusters == 0]
+        y_buy = y_buy[buyer_clusters == 0]
 
-        x3_train, x3_test, y3_train, y3_test = train_test_split(
-            x[cluster_3],
-            y[cluster_3],
-            test_size=test_frac,
+        X_sell, X_val, y_sell, y_val = train_test_split(
+            X_sell,
+            y_sell,
+            test_size=val_split,
             random_state=random_state,
         )
 
-        x2_train, x2_val, y2_train, y2_val = train_test_split(
-            x[cluster_2],
-            y[cluster_2],
-            test_size=num_validation / x[cluster_2].shape[0],
-            random_state=random_state,
-        )
-
-        train_x = torch.cat([x[cluster_1], x2_train, x3_train])
-        train_y = torch.cat([y[cluster_1], y2_train, y3_train])
-
-        val_x = x2_val
-        val_y = y2_val
-
-        test_x = x3_test
-        test_y = y3_test
+        val_clusters = KM.predict(X_val)
+        X_val = X_val[val_clusters == 1][:num_val]
+        y_val = y_val[val_clusters == 1][:num_val]
 
     else:
         X_sell, X_val, y_sell, y_val = train_test_split(
@@ -112,8 +108,25 @@ def get_data(
             test_size=val_split,
             random_state=random_state,
         )
+        X_val = X_val[:num_val]
+        y_val = y_val[:num_val]
 
-    return X_sell, y_sell, X_val, y_val, X_buy, y_buy
+    if buyer_subset:
+        # print('buyer subset'.center(40, '='))
+        X_buy = X_sell[:num_buyer]
+        y_buy = y_sell[:num_buyer]
+        assert np.allclose(X_sell[0], X_buy[0])
+
+    if seller_subset:
+        # print('seller subset'.center(40, '='))
+        X_sell = np.concatenate([X_buy, X_sell])
+        y_sell = np.concatenate([y_buy, y_sell])
+        assert np.allclose(X_sell[0], X_buy[0])
+
+    if return_beta:
+        return X_sell, y_sell, X_val, y_val, X_buy, y_buy, beta_true
+    else:
+        return X_sell, y_sell, X_val, y_val, X_buy, y_buy
 
 
 def get_baseline_values(
@@ -126,30 +139,45 @@ def get_baseline_values(
     metric=mean_squared_error,
     random_state=0,
     baselines=["DataOob"],
+    baseline_kwargs={"DataOob": {"num_models": 100}},
+    use_ridge=False,
 ):
     fetcher = DataFetcher.from_data_splits(
         train_x, train_y, val_x, val_y, test_x, test_y, one_hot=False
     )
-    model = RegressionSkLearnWrapper(LinearRegression)
+    if use_ridge:
+        model = RegressionSkLearnWrapper(Ridge)
+    else:
+        model = RegressionSkLearnWrapper(LinearRegression)
+
+    kwargs = defaultdict(dict)
+    for b in baselines:
+        kwargs[b]["random_state"] = random_state
+        if b in baseline_kwargs:
+            for k, v in baseline_kwargs[b].items():
+                kwargs[b][k] = v
+
     baseline_values = {
-        k: getattr(dataval, k)(random_state=random_state)
+        b: getattr(dataval, b)(**kwargs[b])
         .train(fetcher=fetcher, pred_model=model)
         .data_values
-        for k in baselines
+        for b in baselines
     }
     return baseline_values
 
 
 def evaluate_subset(train_subset, train_x, train_y, test_x, test_y):
-    if isinstance(train_x, torch.Tensor):
-        train_x = train_x.numpy()
-        train_y = train_y.numpy()
-        test_x = test_x.numpy()
-        test_y = test_y.numpy()
-    LR = LinearRegression()
-    LR.fit(train_x[train_subset], train_y[train_subset])
-    pred = LR.predict(test_x)
-    error = mean_squared_error(test_y, pred)
+    # if isinstance(train_x, torch.Tensor):
+    #     train_x = train_x.numpy()
+    #     train_y = train_y.numpy()
+    #     test_x = test_x.numpy()
+    #     test_y = test_y.numpy()
+    # LR = LinearRegression()
+    # LR.fit(train_x[train_subset], train_y[train_subset])
+    # pred = LR.predict(test_x)
+    # error = mean_squared_error(test_y, pred)
+    coef = frank_wolfe.least_norm_linear_regression(train_x[train_subset], train_y[train_subset])
+    error = frank_wolfe.MSE(test_x, test_y, coef)
     return error
 
 
@@ -160,6 +188,7 @@ def design_selection(
     num_iters=100,
     alpha=0.1,
     line_search=False,
+    scale_cov=True,
 ):
     X_sell, y_sell = seller_data
     X_buy, y_buy = buyer_data
@@ -173,7 +202,13 @@ def design_selection(
         return cov / (cov.max() - cov.min())
 
     # inverse covariance matrix
-    inv_cov = np.linalg.pinv(X_sell.T @ X_sell)
+    inv_cov = np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell)
+    # inv_cov = np.linalg.pinv(np.cov(X_sell.T))
+
+    if scale_cov:
+        inv_cov = scale(
+            inv_cov
+        )  # rescale inverse covariance matrix to be between 0 and 1
 
     # experimental design loss i.e. E[X_buy.T @ inv_cov @ X]
     loss = frank_wolfe.compute_exp_design_loss(X_buy, inv_cov)
@@ -188,12 +223,12 @@ def design_selection(
         update_coord = np.argmax(neg_grad)
 
         # Step size
-        if line_search:
-            alpha, loss = frank_wolfe.opt_step_size(
-                X_sell[update_coord], X_buy, inv_cov, loss
-            )
-        else:
-            alpha = 0.1
+        # if line_search:
+        #     alpha, loss = frank_wolfe.opt_step_size(
+        #         X_sell[update_coord], X_buy, inv_cov, loss
+        #     )
+        # else:
+        #     alpha = 0.01
             # alpha = 2 / (3 + i)
 
         # Update weight vector
@@ -207,9 +242,12 @@ def design_selection(
             alpha * X_sell[update_coord, :],
             X_sell[update_coord, :],
         )
-        inv_cov = scale(
-            inv_cov
-        )  # rescale inverse covariance matrix to be between 0 and 1
+
+        if scale_cov:
+            inv_cov = scale(
+                inv_cov
+            )  # rescale inverse covariance matrix to be between 0 and 1
+        
         selected_seller_indices = np.unique(
             np.random.choice(np.arange(weights.shape[0]), size=num_select, p=weights)
         )
@@ -231,16 +269,48 @@ def main(args):
     results_dir = Path(args.results_dir)
     results_dir.mkdir(exist_ok=True)
 
+    save_name = "gaussian"
+    if args.cluster:
+        save_name += "_cluster"
+
+    if args.buyer_subset:
+        save_name += f"_buyer_subset"
+
+    if args.seller_subset:
+        save_name += f"_seller_subset"
+
+    save_name += f"_dim_{args.num_dim}"
+
+    save_name += f"_alpha_{args.alpha}"
+
+    save_name += f"_{args.seed}"
+
+    if args.debug:
+        save_name = "debug"
+
     X_sell, y_sell, X_val, y_val, X_buy, y_buy = get_data(
         cluster=args.cluster,
         scale_data=args.scale_data,
         random_seed=args.seed,
         num_seller=1000 if args.debug else args.num_seller,
-        num_buyer=max(args.num_buyers),
+        num_buyer=(5 if args.cluster else 1) * max(args.num_buyers),
         dim=100 if args.debug else args.num_dim,
         noise_level=10,
         val_split=0.1,
+        seller_subset=args.seller_subset,
+        buyer_subset=args.buyer_subset,
+        
     )
+    print(f"{X_sell.shape=}")
+    print(f"{X_val.shape=}")
+    print(f"{X_buy.shape=}")
+
+    np.save(results_dir / f"{save_name}_X_sell.npy", X_sell)
+    np.save(results_dir / f"{save_name}_y_sell.npy", y_sell)
+    np.save(results_dir / f"{save_name}_X_val.npy", X_val)
+    np.save(results_dir / f"{save_name}_y_val.npy", y_val)
+    np.save(results_dir / f"{save_name}_X_buy.npy", X_buy)
+    np.save(results_dir / f"{save_name}_y_buy.npy", y_buy)
 
     # our method (experimental design loss)
     design_values = {}
@@ -259,8 +329,8 @@ def main(args):
             seller_data,
             buyer_data,
             num_select=100,
-            num_iters=10 if args.debug else args.num_iters,
-            alpha=0.1,
+            num_iters=25 if args.debug else args.num_iters,
+            alpha=args.alpha,
             line_search=False,
         )
         design_values[num_buyer] = design_results["weights"]
@@ -270,9 +340,9 @@ def main(args):
         exp_end = time.perf_counter()
         print(f"Finished in {exp_end-exp_start:.0f} seconds".center(40, "-"))
 
+    # other data valuation baselines
     print(f"Starting baselines".center(40, "-"))
     base_start = time.perf_counter()
-    # other data valuation baselines
     baseline_values = get_baseline_values(
         X_sell,
         y_sell,
@@ -312,41 +382,37 @@ def main(args):
         }
     print(f"Finished baseline evaluations".center(40, "-"))
 
-    random_trials = range(5)  # average mse over random samples of weights
+    random_trials = range(10)  # average mse over random samples of weights
     design_evals = {}
     for num_buy, weights in design_values.items():
         design_evals[f"exp_design_{num_buy}"] = {
-            k: np.mean(
-                [
-                    evaluate_subset(
-                        np.unique(
-                            np.random.choice(
-                                np.arange(weights.shape[0]), size=k, p=weights
-                            )
-                        ),
-                        X_sell,
-                        y_sell,
-                        X_buy,
-                        y_buy,
-                    )
-                    for _ in random_trials
-                ]
+            k: np.mean([evaluate_subset(
+                np.unique(np.random.choice(np.arange(weights.shape[0]), size=k, p=weights)),
+                X_sell,
+                y_sell,
+                X_buy,
+                y_buy,
+            )
+                        for _ in random_trials
+                       ]
             )
             for k in eval_range
         }
+        
     print(f"Finished design evaluations".center(40, "-"))
 
     # One-step baseline
     inv_cov = np.linalg.inv(X_sell.T @ X_sell)
-    one_step_values = np.mean((X_sell @ inv_cov @ X_buy.T) ** 2, axis=1).argsort()
+    one_step_values = np.mean((X_sell @ inv_cov @ X_buy.T) ** 2, axis=1)
     design_values["one_step"] = one_step_values
     design_evals["one_step"] = {
-        k: evaluate_subset(one_step_values[-k:], X_sell, y_sell, X_buy, y_buy)
+        k: evaluate_subset(one_step_values.argsort()[-k:], X_sell, y_sell, X_buy, y_buy)
         for k in eval_range
     }
 
     # Random seller baseline
     random_seller_values = np.random.permutation(X_sell.shape[0])
+    design_evals["random_seller"] = random_seller_values
     design_evals["random_seller"] = {
         k: np.mean(
             [
@@ -359,6 +425,7 @@ def main(args):
 
     # Random buyer baseline
     random_buyer_values = np.random.permutation(X_sell.shape[0])
+    design_evals["random_buyer"] = random_buyer_values
     design_evals["random_buyer"] = {
         k: np.mean(
             [
@@ -379,17 +446,6 @@ def main(args):
         "baselines": {k: np.array(v).tolist() for k, v in baseline_evals.items()},
     }
 
-    save_name = "gaussian"
-    if args.cluster:
-        save_name += "cluster"
-
-    save_name += f"dim_{args.num_dim}"
-
-    save_name += str(args.seed)
-
-    if args.debug:
-        save_name = "debug"
-
     with open(results_dir / f"{save_name}-design-losses.json", "w") as fh:
         json.dump(design_losses, fh, default=float, indent=4)
 
@@ -404,7 +460,10 @@ def main(args):
 
     print("Experiment completed".center(40, "="))
 
-
+# TODO additional experiments
+# buyer is subset of seller data / some of seller data is buyer data repeated
+# vary buyers dataset between 5-100; vary k as 1-5x the buyer dataset
+# increase number of clusters
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="main_gaussian.py",
@@ -414,19 +473,28 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cluster", action="store_true", help="use non IID validation set"
     )
+    parser.add_argument("--buyer_subset", action="store_true", help="buyer is subset of seller data")
+    parser.add_argument("--seller_subset", action="store_true", help="seller data contains subsets of the buyer data")
     parser.add_argument("--scale_data", action="store_true", help="standardize data")
     parser.add_argument(
         "--num_buyers",
         nargs="+",
-        default=[10, 100, 1000],
+        default=[1, 5, 25, 50, 75, 100],
+        # default=[5, 25, 50],
         type=list,
         help="number of buyer points used in experimental design",
     )
     parser.add_argument(
         "--num_seller",
-        default=100000,
+        default=10000,
         type=int,
         help="number of seller points used in experimental design",
+    )
+    parser.add_argument(
+        "--num_val",
+        default=1000,
+        type=int,
+        help="number of validation points for baselines",
     )
     parser.add_argument(
         "--num_dim",
@@ -436,15 +504,22 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--num_iters",
-        default=100,
+        default=200,
         type=int,
         help="number of iterations to optimize experimental design",
+    )
+    parser.add_argument(
+        "--alpha",
+        default=0.2,
+        type=float,
+        help="optimization step size",
     )
     parser.add_argument(
         "-b",
         "--baselines",
         nargs="+",
-        default=["DataOob", "BetaShapley", "RandomEvaluator"],
+        default=["DataOob", "RandomEvaluator"],
+        # default=["DataOob", "BetaShapley", "RandomEvaluator"],
         type=list,
         help="Compare to other data valution baselines in opendataval",
     )

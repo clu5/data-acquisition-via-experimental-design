@@ -100,7 +100,8 @@ def project_onto_subspace(v, W):
     - np.ndarray: The projection of v onto the subspace. Shape (d,) or (n, d).
     """
     # Compute the projection
-    proj = v @ W.T @ np.linalg.inv(W @ W.T) @ W
+    # proj = v @ W.T @ np.linalg.inv(W @ W.T) @ W
+    proj = v @ W.T @ np.linalg.pinv(W @ W.T) @ W
     
     return proj
 
@@ -136,11 +137,11 @@ def evaluate_indices(X_sell, y_sell, X_buy, y_buy, data_indices, inverse_covaria
     if inverse_covariance is None:
         inverse_covariance = np.linalg.pinv(X_selected.T @ X_selected)
     exp_loss = compute_exp_design_loss(X_buy, inverse_covariance)
-    precision, recall = measure_coverage(X_selected, X_buy)
+    # precision, recall = measure_coverage(X_selected, X_buy)
     return {
         "exp_loss": exp_loss, 
-        "precision" : precision, 
-        "recall" : recall, 
+        # "precision" : precision, 
+        # "recall" : recall, 
         "mse_error" : buy_error, 
     }
     
@@ -207,7 +208,6 @@ def compute_neg_gradient(X_sell, X_buy, inverse_covariance):
 
     return neg_gradient
 
-
 # Define the experiment design loss function
 def opt_step_size(X_sell_data, X_buy, inverse_covariance, old_loss, lower=1e-3):
     """
@@ -245,3 +245,11 @@ def opt_step_size(X_sell_data, X_buy, inverse_covariance, old_loss, lower=1e-3):
     result = minimize_scalar(loss, bounds=(lower, 0.9))
     # result = minimize_scalar(loss, bounds=(0, 0.9))
     return result.x, result.fun
+
+
+# One-step baseline
+def one_step(X_sell, X_buy):
+    # inv_cov = np.linalg.inv(X_sell.T @ X_sell)
+    inv_cov = np.linalg.inv(np.cov(X_sell.T))
+    one_step_values = np.mean((X_sell @ inv_cov @ X_buy.T) ** 2, axis=1)
+    return one_step_values
