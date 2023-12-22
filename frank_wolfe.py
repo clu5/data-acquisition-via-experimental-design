@@ -184,8 +184,8 @@ def compute_exp_design_loss(X_buy, inverse_covariance):
     """
 
     # Compute the matrix product E[x_0^T P x_0]
-    # return np.mean((X_buy @ inverse_covariance) * X_buy) * X_buy.shape[-1]
-    return np.einsum('ij,jk,ik->ik', X_buy, inverse_covariance, X_buy).mean()
+    return np.mean((X_buy @ inverse_covariance) * X_buy) * X_buy.shape[-1]
+    # return np.einsum('ij,jk,ik->ik', X_buy, inverse_covariance, X_buy).mean()
 
 def compute_neg_gradient(X_sell, X_buy, inverse_covariance):
     """

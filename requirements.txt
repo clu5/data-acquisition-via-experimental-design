@@ -6,3 +6,4 @@ cvxpy
 opendataval
 gpytorch
 statsmodels
+jupyterlab_vim
