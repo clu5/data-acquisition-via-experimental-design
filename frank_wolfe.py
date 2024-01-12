@@ -242,8 +242,8 @@ def opt_step_size(X_sell_data, X_buy, inverse_covariance, old_loss, lower=1e-3):
     # print(a, b, c)
     # Compute optimal step size
     loss = lambda x: (1 / (1 - x)) * (a - (x * b) / (1 - x * (1 - c)))
-    result = minimize_scalar(loss, bounds=(lower, 0.9))
-    # result = minimize_scalar(loss, bounds=(0, 0.9))
+    # result = minimize_scalar(loss, bounds=(lower, 0.9))
+    result = minimize_scalar(loss, bounds=(0, 0.9))
     return result.x, result.fun
 
 

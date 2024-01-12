@@ -40,130 +40,6 @@ from tqdm import tqdm
 import frank_wolfe
 
 
-def get_data(
-    scale_data=False,
-    cluster=False,
-    random_seed=0,
-    num_seller=10000,
-    num_buyer=1000,
-    num_val=1000,
-    dim=1000,
-    noise_level=1,
-    val_split=0.1,
-    buyer_subset=False,
-    num_seller_subset=0,
-    return_beta=False,
-    exponential=False,
-    student_df=1,
-    n_clusters=30,
-    bone_data=False,
-    cost_fn=None,
-    costs=None,
-):
-    random_state = check_random_state(random_seed)
-
-    val_split = num_val / (num_val + num_seller)
-    num_seller += num_val
-
-    if cluster:
-        num_buyer *= n_clusters
-
-    if bone_data:
-        img = torch.load('bone-features.pt')
-        img = img.to(torch.double).numpy()
-        lab = torch.load('bone-labels.pt').numpy()
-        X_sell, X_buy, y_sell, y_buy = train_test_split(img, lab, test_size=num_buyer, random_state=random_state)
-        X_sell = X_sell[:num_seller]
-        y_sell = y_sell[:num_seller]
-    else:
-        # Generate some random seller data
-        X_sell = np.random.normal(size=(num_seller, dim))
-        X_sell /= np.linalg.norm(X_sell, axis=1, keepdims=True)  # normalize data
-
-        # generate true coefficients
-        beta_true = np.random.exponential(scale=1, size=dim)
-        beta_true *= np.sign(np.random.random(size=dim))
-
-        if cost_fn is not None and costs is not None:
-            X_sell *= cost_fn(costs)
-            
-            y_sell = X_sell @ beta_true + noise_level * np.random.randn(num_seller)
-        else:
-            y_sell = X_sell @ beta_true + noise_level * np.random.randn(num_seller)
-
-        # Generate some random buyer data
-        if exponential:
-            X_buy = np.random.exponential(size=[num_buyer, dim])
-        elif student_df:
-            X_buy = np.random.standard_t(df=student_df, size=[num_buyer, dim])
-        else:
-            X_buy = np.random.normal(size=[num_buyer, dim])
-        X_buy /= np.linalg.norm(X_buy, axis=1, keepdims=True)  # normalize data
-        y_buy = X_buy @ beta_true
-        # y_buy = X_buy @ beta_true + noise_level * np.random.randn(num_buyer)
-
-    if scale_data:
-        MMS = MinMaxScaler()
-        #X_sell = MMS.fit_transform(X_sell)
-        y_sell = MMS.fit_transform(y_sell.reshape(-1, 1)).squeeze()
-        #X_buy = MMS.fit_transform(X_buy)
-        y_buy = MMS.fit_transform(y_buy. reshape(-1, 1)).squeeze()
-
-    if cluster:
-        KM = KMeans(n_clusters=n_clusters, init="k-means++")
-        KM.fit(X_buy)
-        buyer_clusters = KM.labels_
-
-        X_buy = X_buy[buyer_clusters == 0]
-        y_buy = y_buy[buyer_clusters == 0]
-
-        X_sell, X_val, y_sell, y_val = train_test_split(
-            X_sell,
-            y_sell,
-            test_size=val_split,
-            random_state=random_state,
-        )
-
-        #val_clusters = KM.predict(X_val)
-        #X_val = X_val[val_clusters == 1][:num_val]
-        #y_val = y_val[val_clusters == 1][:num_val]
-        X_val = X_val[:num_val]
-        y_val = y_val[:num_val]
-
-    else:
-        X_sell, X_val, y_sell, y_val = train_test_split(
-            X_sell,
-            y_sell,
-            test_size=val_split,
-            random_state=random_state,
-        )
-        X_val = X_val[:num_val]
-        y_val = y_val[:num_val]
-
-    if buyer_subset:
-        # print('buyer subset'.center(40, '='))
-        X_buy = X_sell[:num_buyer]
-        y_buy = y_sell[:num_buyer]
-        assert np.allclose(X_sell[0], X_buy[0])
-
-    if num_seller_subset > 0:
-        # print('seller subset'.center(40, '='))
-        X_sell = np.concatenate([np.tile(X_buy, (num_seller_subset, 1)), X_sell])
-        if bone_data:
-            y_sell = np.concatenate([y_buy, y_sell])
-        else:
-            noisy_y_buy = np.tile(y_buy, num_seller_subset) + noise_level * np.random.randn(num_seller_subset * num_buyer)
-            y_sell = np.concatenate([noisy_y_buy, y_sell])
-        assert np.allclose(X_sell[0], X_buy[0])
-
-    if bone_data:
-        beta_true = None
-    if return_beta:
-        return X_sell, y_sell, X_val, y_val, X_buy, y_buy, beta_true
-    else:
-        return X_sell, y_sell, X_val, y_val, X_buy, y_buy
-
-
 def get_baseline_values(
     train_x,
     train_y,
@@ -230,6 +106,7 @@ def design_selection(
     scale_cov=False,
     compute_inverse=False,
     shrink=True,
+    recompute_interval=50,
 ):
     X_sell, y_sell = seller_data
     X_buy, y_buy = buyer_data
@@ -257,17 +134,28 @@ def design_selection(
     # track losses and errors
     losses = {}
     errors = {}
+    coords = {}
+    alphas = {}
 
     for i in tqdm(range(num_iters)):
+
+        # Recomute actual inverse to periodically recalibrate 
+        if recompute_interval > 0 and i % recompute_interval == 0:
+            inv_cov = np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell)
+        
         # Pick coordinate with largest gradient to update
         neg_grad = frank_wolfe.compute_neg_gradient(X_sell, X_buy, inv_cov)
         update_coord = np.argmax(neg_grad)
+        
+        coords[i] = update_coord
 
         # Step size
-        # if line_search:
-        #     alpha, loss = frank_wolfe.opt_step_size(
-        #         X_sell[update_coord], X_buy, inv_cov, loss
-        #     )
+        if line_search:
+            alpha, line_loss = frank_wolfe.opt_step_size(
+                X_sell[update_coord], X_buy, inv_cov, loss
+            )
+        alphas[i] = alpha
+        
         # else:
         #     alpha = 0.01
             # alpha = 2 / (3 + i)
@@ -276,25 +164,26 @@ def design_selection(
         if shrink:
             weights *= 1 - alpha  # shrink weights by 1 - alpha
         weights[update_coord] += alpha  # increase magnitude of picked coordinate
-
-        if compute_inverse:
-            inv_cov = np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell)
-        else:
-            # Update inverse covariance matrix
-            if shrink:
-                inv_cov /= 1 - alpha  # Update with respect to weights shrinking
-            inv_cov = frank_wolfe.sherman_morrison_update_inverse(  # update with respect to picked coordinate increasing
-                inv_cov,
-                alpha * X_sell[update_coord, :],
-                X_sell[update_coord, :],
-            )
+        
+        # Update inverse covariance matrix
+        if shrink:
+            inv_cov /= 1 - alpha  # Update with respect to weights shrinking
+        inv_cov = frank_wolfe.sherman_morrison_update_inverse(  # update with respect to picked coordinate increasing
+            inv_cov,
+            alpha * X_sell[update_coord, :],
+            X_sell[update_coord, :],
+        )
 
         if scale_cov:
             inv_cov = scale(
                 inv_cov
             )  # rescale inverse covariance matrix to be between 0 and 1
 
-        selected_seller_indices = np.random.choice(np.arange(weights.shape[0]), size=num_select, p=weights/weights.sum())
+        # selected_seller_indices = np.random.choice(
+        #     np.arange(weights.shape[0]), size=num_select, p=weights/weights.sum(), replace=False
+        # )
+        selected_seller_indices = weights.argsort()[::-1][:num_select]
+        
         results = frank_wolfe.evaluate_indices(
             X_sell,
             y_sell,
@@ -304,8 +193,20 @@ def design_selection(
             inverse_covariance=inv_cov,
         )
         losses[i] = results["exp_loss"]
+        # losses[i] = frank_wolfe.compute_exp_design_loss(X_buy, inv_cov)
         errors[i] = results["mse_error"]
-    return dict(losses=losses, errors=errors, weights=weights)
+
+    
+    cov_err = np.max(np.square(inv_cov - np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell)))
+        
+    return dict(
+        losses=losses, 
+        errors=errors, 
+        weights=weights, 
+        coords=coords, 
+        cov_err=cov_err, 
+        alphas=alphas,
+    )
 
 
 def main(args):

@@ -1,5 +1,5 @@
 jupyterlab
-scipy
+scipy==1.10
 scikit-learn
 tqdm
 cvxpy
