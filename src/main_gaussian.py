@@ -17,8 +17,8 @@ import torch
 from opendataval import dataval
 from opendataval.dataloader import DataFetcher
 from opendataval.dataval import (AME, DVRL, BetaShapley, DataBanzhaf, DataOob,
-                                 DataShapley, InfluenceFunction, InfluenceSubsample,
-                                 KNNShapley, LavaEvaluator,
+                                 DataShapley, InfluenceFunction,
+                                 InfluenceSubsample, KNNShapley, LavaEvaluator,
                                  LeaveOneOut, RandomEvaluator,
                                  RobustVolumeShapley)
 from opendataval.model import RegressionSkLearnWrapper
@@ -72,13 +72,17 @@ def get_baseline_values(
     baseline_runtimes = {}
     for b in baselines:
         start_time = time.perf_counter()
-        print(b.center(40, '-'))
-        baseline_values[b] = getattr(dataval, b)(**kwargs[b]).train(fetcher=fetcher, pred_model=model).data_values
+        print(b.center(40, "-"))
+        baseline_values[b] = (
+            getattr(dataval, b)(**kwargs[b])
+            .train(fetcher=fetcher, pred_model=model)
+            .data_values
+        )
         end_time = time.perf_counter()
         runtime = end_time - start_time
-        print(f'\tTIME: {runtime:.0f}')
+        print(f"\tTIME: {runtime:.0f}")
         baseline_runtimes[b] = runtime
-    return baseline_values, baseline_runtimes 
+    return baseline_values, baseline_runtimes
 
 
 def evaluate_subset(train_subset, train_x, train_y, test_x, test_y):
@@ -91,7 +95,9 @@ def evaluate_subset(train_subset, train_x, train_y, test_x, test_y):
     # LR.fit(train_x[train_subset], train_y[train_subset])
     # pred = LR.predict(test_x)
     # error = mean_squared_error(test_y, pred)
-    coef = frank_wolfe.least_norm_linear_regression(train_x[train_subset], train_y[train_subset])
+    coef = frank_wolfe.least_norm_linear_regression(
+        train_x[train_subset], train_y[train_subset]
+    )
     error = frank_wolfe.MSE(test_x, test_y, coef)
     return error
 
@@ -107,6 +113,7 @@ def design_selection(
     compute_inverse=False,
     shrink=True,
     recompute_interval=50,
+    early_stop_threshold=None,
 ):
     X_sell, y_sell = seller_data
     X_buy, y_buy = buyer_data
@@ -138,15 +145,14 @@ def design_selection(
     alphas = {}
 
     for i in tqdm(range(num_iters)):
-
-        # Recomute actual inverse to periodically recalibrate 
+        # Recomute actual inverse to periodically recalibrate
         if recompute_interval > 0 and i % recompute_interval == 0:
             inv_cov = np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell)
-        
+
         # Pick coordinate with largest gradient to update
         neg_grad = frank_wolfe.compute_neg_gradient(X_sell, X_buy, inv_cov)
         update_coord = np.argmax(neg_grad)
-        
+
         coords[i] = update_coord
 
         # Step size
@@ -154,17 +160,21 @@ def design_selection(
             alpha, line_loss = frank_wolfe.opt_step_size(
                 X_sell[update_coord], X_buy, inv_cov, loss
             )
+
+        if early_stop_threshold is not None and alpha < early_stop_threshold:
+            break
+
         alphas[i] = alpha
-        
+
         # else:
         #     alpha = 0.01
-            # alpha = 2 / (3 + i)
+        # alpha = 2 / (3 + i)
 
         # Update weight vector
         if shrink:
             weights *= 1 - alpha  # shrink weights by 1 - alpha
         weights[update_coord] += alpha  # increase magnitude of picked coordinate
-        
+
         # Update inverse covariance matrix
         if shrink:
             inv_cov /= 1 - alpha  # Update with respect to weights shrinking
@@ -183,7 +193,7 @@ def design_selection(
         #     np.arange(weights.shape[0]), size=num_select, p=weights/weights.sum(), replace=False
         # )
         selected_seller_indices = weights.argsort()[::-1][:num_select]
-        
+
         results = frank_wolfe.evaluate_indices(
             X_sell,
             y_sell,
@@ -196,15 +206,16 @@ def design_selection(
         # losses[i] = frank_wolfe.compute_exp_design_loss(X_buy, inv_cov)
         errors[i] = results["mse_error"]
 
-    
-    cov_err = np.max(np.square(inv_cov - np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell)))
-        
+    cov_err = np.max(
+        np.square(inv_cov - np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell))
+    )
+
     return dict(
-        losses=losses, 
-        errors=errors, 
-        weights=weights, 
-        coords=coords, 
-        cov_err=cov_err, 
+        losses=losses,
+        errors=errors,
+        weights=weights,
+        coords=coords,
+        cov_err=cov_err,
         alphas=alphas,
     )
 
@@ -289,8 +300,7 @@ def main(args):
         design_values[num_buyer] = design_results["weights"]
         design_errors[num_buyer] = design_results["errors"]
         design_losses[num_buyer] = design_results["losses"]
-        design_runtimes[f'exp_design_{num_buyer}'] = runtime
-
+        design_runtimes[f"exp_design_{num_buyer}"] = runtime
 
     # other data valuation baselines
     print(f"Starting baselines".center(40, "-"))
@@ -338,20 +348,26 @@ def main(args):
     design_evals = {}
     for num_buy, weights in design_values.items():
         design_evals[f"exp_design_{num_buy}"] = {
-            k: np.mean([evaluate_subset(
-                np.random.choice(np.arange(weights.shape[0]), size=k, p=weights, replace=False),
-                # np.unique(np.random.choice(np.arange(weights.shape[0]), size=k, p=weights)),
-                X_sell,
-                y_sell,
-                X_buy,
-                y_buy,
-            )
-                        for _ in random_trials
-                       ]
+            k: np.mean(
+                [
+                    evaluate_subset(
+                        np.random.choice(
+                            np.arange(weights.shape[0]),
+                            size=k,
+                            p=weights,
+                            replace=False,
+                        ),
+                        # np.unique(np.random.choice(np.arange(weights.shape[0]), size=k, p=weights)),
+                        X_sell,
+                        y_sell,
+                        X_buy,
+                        y_buy,
+                    )
+                    for _ in random_trials
+                ]
             )
             for k in eval_range
         }
-
 
     print(f"Finished design evaluations".center(40, "-"))
 
@@ -393,14 +409,14 @@ def main(args):
     # Save data values and evaluations
     all_values = {}
     for k, v in design_values.items():
-        all_values[k] = np.array(v).tolist() 
+        all_values[k] = np.array(v).tolist()
     for k, v in baseline_values.items():
-        all_values[k] = np.array(v).tolist() 
+        all_values[k] = np.array(v).tolist()
     all_evals = {}
     for k, v in design_evals.items():
-        all_evals[k] = np.array(v).tolist() 
+        all_evals[k] = np.array(v).tolist()
     for k, v in baseline_evals.items():
-        all_evals[k] = np.array(v).tolist() 
+        all_evals[k] = np.array(v).tolist()
     all_runtimes = {}
     for k, v in design_runtimes.items():
         all_runtimes[k] = v
@@ -421,8 +437,9 @@ def main(args):
 
     with open(results_dir / f"{save_name}-runtimes.json", "w") as fh:
         json.dump(all_runtimes, fh, default=float, indent=4)
-        
+
     print("Experiment completed".center(40, "="))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -433,8 +450,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cluster", action="store_true", help="use non IID validation set"
     )
-    parser.add_argument("--buyer_subset", action="store_true", help="buyer is subset of seller data")
-    parser.add_argument("--num_seller_subset", default=0, type=int, help="seller data contains subsets of the buyer data repeated this many times")
+    parser.add_argument(
+        "--buyer_subset", action="store_true", help="buyer is subset of seller data"
+    )
+    parser.add_argument(
+        "--num_seller_subset",
+        default=0,
+        type=int,
+        help="seller data contains subsets of the buyer data repeated this many times",
+    )
     parser.add_argument("--scale_data", action="store_true", help="standardize data")
     parser.add_argument(
         "--num_buyers",
@@ -484,14 +508,14 @@ if __name__ == "__main__":
             "BetaShapley",
             "DataBanzhaf",
             "DataOob",
-            #"DataShapley",
+            # "DataShapley",
             "DVRL",
-            #"InfluenceSubsample",
+            # "InfluenceSubsample",
             "KNNShapley",
             "LavaEvaluator",
             "LeaveOneOut",
             "RandomEvaluator",
-            #"RobustVolumeShapley",
+            # "RobustVolumeShapley",
         ],
         type=str,
         help="Compare to other data valution baselines in opendataval",
@@ -503,9 +527,7 @@ if __name__ == "__main__":
         type=int,
         help="random seed",
     )
-    parser.add_argument(
-        "--bone_data", action="store_true", help="use bone image data"
-    )
+    parser.add_argument("--bone_data", action="store_true", help="use bone image data")
     parser.add_argument(
         "--noise_level",
         default=1,

@@ -1,7 +1,10 @@
-import numpy as np
 import random
+
 import matplotlib.pyplot as plt
+import numpy as np
 from scipy.optimize import minimize_scalar
+from tqdm import tqdm
+
 
 def least_norm_linear_regression(X, y):
     """
@@ -44,48 +47,49 @@ def MSE(X, y, coeff):
 
     return mse
 
+
 def plot_matrix(symmetric_matrix):
-  """
-  Plots the top and bottom eigenvalue as an ellipse to visualize a matrix.
+    """
+    Plots the top and bottom eigenvalue as an ellipse to visualize a matrix.
 
-  Parameters:
-  - symmetric_matrix: A symmetric PSD matrix
+    Parameters:
+    - symmetric_matrix: A symmetric PSD matrix
 
-  Returns:
+    Returns:
 
-  """
-  # Find eigenvalues and eigenvectors
-  eigenvalues, _ = np.linalg.eigh(symmetric_matrix)
-  eigenvalues = np.abs(eigenvalues)
-  # Sort eigenvalues in ascending order
-  eigenvalues = np.sort(eigenvalues)
+    """
+    # Find eigenvalues and eigenvectors
+    eigenvalues, _ = np.linalg.eigh(symmetric_matrix)
+    eigenvalues = np.abs(eigenvalues)
+    # Sort eigenvalues in ascending order
+    eigenvalues = np.sort(eigenvalues)
 
-  # Largest and smallest eigenvalues
-  largest_eigenvalue = eigenvalues[-1]
-  smallest_eigenvalue = eigenvalues[0]
+    # Largest and smallest eigenvalues
+    largest_eigenvalue = eigenvalues[-1]
+    smallest_eigenvalue = eigenvalues[0]
 
-  # Create an ellipse using the largest and smallest eigenvalues
-  theta = np.linspace(0, 2 * np.pi, 100)
-  a = np.sqrt(largest_eigenvalue)
-  b = np.sqrt(smallest_eigenvalue)
-  x = a * np.cos(theta)
-  y = b * np.sin(theta)
+    # Create an ellipse using the largest and smallest eigenvalues
+    theta = np.linspace(0, 2 * np.pi, 100)
+    a = np.sqrt(largest_eigenvalue)
+    b = np.sqrt(smallest_eigenvalue)
+    x = a * np.cos(theta)
+    y = b * np.sin(theta)
 
-  # Plot the ellipse
-  plt.figure(figsize=(6, 6))
-  plt.plot(x, y, label='Ellipse', color='b')
+    # Plot the ellipse
+    plt.figure(figsize=(6, 6))
+    plt.plot(x, y, label="Ellipse", color="b")
 
-  # Set plot limits, labels, and legend
-  plt.xlim(-a, a)
-  plt.ylim(-b, b)
-  plt.xlabel('X')
-  plt.ylabel('Y')
-  plt.legend()
+    # Set plot limits, labels, and legend
+    plt.xlim(-a, a)
+    plt.ylim(-b, b)
+    plt.xlabel("X")
+    plt.ylabel("Y")
+    plt.legend()
 
-  # Show the plot
-  plt.gca().set_aspect('equal', adjustable='box')
-  plt.grid()
-  plt.show()
+    # Show the plot
+    plt.gca().set_aspect("equal", adjustable="box")
+    plt.grid()
+    plt.show()
 
 
 def project_onto_subspace(v, W):
@@ -102,7 +106,7 @@ def project_onto_subspace(v, W):
     # Compute the projection
     # proj = v @ W.T @ np.linalg.inv(W @ W.T) @ W
     proj = v @ W.T @ np.linalg.pinv(W @ W.T) @ W
-    
+
     return proj
 
 
@@ -129,7 +133,10 @@ def measure_coverage(X_selected, X_buy):
 
     return precision, recall
 
-def evaluate_indices(X_sell, y_sell, X_buy, y_buy, data_indices, inverse_covariance=None):
+
+def evaluate_indices(
+    X_sell, y_sell, X_buy, y_buy, data_indices, inverse_covariance=None
+):
     # Train a linear model from the subselected sellers data
     X_selected = X_sell[data_indices]
     coeff_hat = least_norm_linear_regression(X_selected, y_sell[data_indices])
@@ -139,12 +146,12 @@ def evaluate_indices(X_sell, y_sell, X_buy, y_buy, data_indices, inverse_covaria
     exp_loss = compute_exp_design_loss(X_buy, inverse_covariance)
     # precision, recall = measure_coverage(X_selected, X_buy)
     return {
-        "exp_loss": exp_loss, 
-        # "precision" : precision, 
-        # "recall" : recall, 
-        "mse_error" : buy_error, 
+        "exp_loss": exp_loss,
+        # "precision" : precision,
+        # "recall" : recall,
+        "mse_error": buy_error,
     }
-    
+
 
 def sherman_morrison_update_inverse(A_inv, u, v):
     """
@@ -160,7 +167,7 @@ def sherman_morrison_update_inverse(A_inv, u, v):
     """
 
     # Calculate the denominator term (1 + v^T * A_inv * u)
-    denominator = 1. + v.T @ A_inv @ u
+    denominator = 1.0 + v.T @ A_inv @ u
 
     # Calculate the update term (A_inv * u * v^T * A_inv)
     update_term = (A_inv @ u)[:, None] @ (v.T @ A_inv)[None, :]
@@ -187,6 +194,7 @@ def compute_exp_design_loss(X_buy, inverse_covariance):
     return np.mean((X_buy @ inverse_covariance) * X_buy) * X_buy.shape[-1]
     # return np.einsum('ij,jk,ik->ik', X_buy, inverse_covariance, X_buy).mean()
 
+
 def compute_neg_gradient(X_sell, X_buy, inverse_covariance):
     """
     Compute the negative gradient vector of the exp design loss.
@@ -204,9 +212,10 @@ def compute_neg_gradient(X_sell, X_buy, inverse_covariance):
     product_matrix = X_sell @ inverse_covariance @ X_buy.T
 
     # Calculate the squared norms of rows E(x_i^T P x_0)^2
-    neg_gradient = np.mean(product_matrix ** 2, axis=1)
+    neg_gradient = np.mean(product_matrix**2, axis=1)
 
     return neg_gradient
+
 
 # Define the experiment design loss function
 def opt_step_size(X_sell_data, X_buy, inverse_covariance, old_loss, lower=1e-3):
@@ -236,7 +245,7 @@ def opt_step_size(X_sell_data, X_buy, inverse_covariance, old_loss, lower=1e-3):
     a = old_loss
     # # E(x_0 P x_i)^2
     prod = (X_sell_data.T @ inverse_covariance) @ X_buy.T
-    b = np.mean(prod ** 2)
+    b = np.mean(prod**2)
     c = X_sell_data @ inverse_covariance @ X_sell_data
 
     # print(a, b, c)
@@ -249,7 +258,100 @@ def opt_step_size(X_sell_data, X_buy, inverse_covariance, old_loss, lower=1e-3):
 
 # One-step baseline
 def one_step(X_sell, X_buy):
-    # inv_cov = np.linalg.inv(X_sell.T @ X_sell)
-    inv_cov = np.linalg.inv(np.cov(X_sell.T))
+    inv_cov = np.linalg.inv(X_sell.T @ X_sell)
     one_step_values = np.mean((X_sell @ inv_cov @ X_buy.T) ** 2, axis=1)
     return one_step_values
+
+
+def design_selection(
+    X_sell,
+    y_sell,
+    X_buy,
+    y_buy,
+    num_select=10,
+    num_iters=1000,
+    alpha=0.01,
+    line_search=True,
+    recompute_interval=50,
+    early_stop_threshold=None,
+    sampling_selection_error=True,
+):
+    # initialize seller weights
+    n_sell = X_sell.shape[0]
+    weights = np.ones(n_sell) / n_sell
+
+    # Compute inverse covariance matrix
+    inv_cov = np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell)
+
+    # experimental design loss i.e. E[X_buy.T @ inv_cov @ X]
+    loss = compute_exp_design_loss(X_buy, inv_cov)
+
+    # track losses and errors
+    losses = {}
+    errors = {}
+    coords = {}
+    alphas = {}
+
+    for i in tqdm(range(num_iters)):
+        # Recomute actual inverse covariance to periodically recalibrate
+        if recompute_interval > 0 and i % recompute_interval == 0:
+            inv_cov = np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell)
+
+        # Pick coordinate with largest gradient to update
+        neg_grad = compute_neg_gradient(X_sell, X_buy, inv_cov)
+        update_coord = np.argmax(neg_grad)
+
+        coords[i] = update_coord
+
+        # Optimize step size with line search
+        if line_search or alpha is None:
+            alpha, line_loss = opt_step_size(X_sell[update_coord], X_buy, inv_cov, loss)
+
+        # Terminate early if step size is too small
+        if early_stop_threshold is not None and alpha < early_stop_threshold:
+            break
+
+        alphas[i] = alpha
+
+        # Update weight vector
+        weights *= 1 - alpha  # shrink weights by 1 - alpha
+        weights[update_coord] += alpha  # increase magnitude of picked coordinate
+
+        # Update inverse covariance matrix
+        inv_cov /= 1 - alpha  # Update with respect to weights shrinking
+
+        # update with respect to picked coordinate increasing
+        inv_cov = sherman_morrison_update_inverse(
+            inv_cov,
+            alpha * X_sell[update_coord, :],
+            X_sell[update_coord, :],
+        )
+
+        if sampling_selection_error:
+            selected_seller_indices = np.random.choice(
+                np.arange(weights.shape[0]),
+                size=num_select,
+                p=weights / weights.sum(),
+                replace=False,
+            )
+        else:
+            selected_seller_indices = weights.argsort()[::-1][:num_select]
+
+        results = evaluate_indices(
+            X_sell,
+            y_sell,
+            X_buy,
+            y_buy,
+            selected_seller_indices,
+            inverse_covariance=inv_cov,
+        )
+        losses[i] = compute_exp_design_loss(X_buy, inv_cov)
+        errors[i] = results["mse_error"]
+
+    return dict(
+        losses=losses,
+        errors=errors,
+        weights=weights,
+        coords=coords,
+        alphas=alphas,
+    )

@@ -1,10 +1,11 @@
 from time import perf_counter
-import numpy as np
+
 import cvxpy as cp
+import numpy as np
 
 
 class Valuator:
-    """ Data valuation using optimal experimental design with continous relaxation.
+    """Data valuation using optimal experimental design with continous relaxation.
 
     Parameters
     ----------
@@ -14,6 +15,7 @@ class Valuator:
         componetns to use in PCA
 
     """
+
     def __init__(self, print_info=True):
         self.print_info = print_info
 
@@ -25,15 +27,17 @@ class Valuator:
         np.ndarray
             Optimized weights for each seller data point
         """
-        def objective(buyer_data, seller_data, seller_weights):
+
+        def objective_func(buyer_data, seller_data, seller_weights):
             m = buyer_data.shape[0]
             W = cp.diag(seller_weights)
-            cost = cp.matrix_frac(buyer_data.T, (seller_data.T @ W @ seller_data) )
+            cost = cp.matrix_frac(buyer_data.T, (seller_data.T @ W @ seller_data))
             return cost / m
 
         seller_weights = cp.Variable(seller_data.shape[0])
         constraints = [seller_weights >= 0, sum(seller_weights) == 1]
-        prob = cp.Problem(cp.Minimize(objective(buyer_data, seller_data, seller_weights)), constraints)
+        obj = objective_func(buyer_data, seller_data, seller_weights)
+        prob = cp.Problem(cp.Minimize(obj), constraints)
         start = perf_counter()
         prob.solve()
         end = perf_counter()
