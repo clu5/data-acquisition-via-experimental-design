@@ -258,7 +258,8 @@ def opt_step_size(X_sell_data, X_buy, inverse_covariance, old_loss, lower=1e-3):
 
 # One-step baseline
 def one_step(X_sell, X_buy):
-    inv_cov = np.linalg.inv(X_sell.T @ X_sell)
+    # inv_cov = np.linalg.inv(X_sell.T @ X_sell)
+    inv_cov = np.linalg.pinv(X_sell.T @ X_sell)
     one_step_values = np.mean((X_sell @ inv_cov @ X_buy.T) ** 2, axis=1)
     return one_step_values
 

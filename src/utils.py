@@ -51,14 +51,26 @@ def get_gaussian_data(num_samples=100, dim=10, noise=0.1, costs=None):
     return dict(X=X, y=y, coef=coef, noise=noise, dim=dim, costs=costs)
 
 
-def get_news_data(num_samples=100, dim=10, data_dir="csvs", scale=True):
-    df = pd.read_csv(Path(data_dir) / "OnlineNewsPopularity.csv")
-    X = df.iloc[:, 1 : dim + 1 - 1].values
+def get_news_data(data_dir, num_samples=100, csv_path="OnlineNewsPopularity.csv", scale=True):
+    df = pd.read_csv(data_dir / csv_path)
+    X = df.iloc[:, 1 : -1].values
     y = df.iloc[:, -1].values.astype(float)
     if scale:
         X = MinMaxScaler().fit_transform(X)
         # y = (y - y.min()) / (y.max() - y.min())
     # coef = np.linalg.inv(X.T.dot(X)).dot(X.T).dot(y)
+    coef = np.linalg.pinv(X).dot(y)
+    return dict(X=X[:num_samples], y=y[:num_samples], coef=coef)
+
+
+def get_mimic_data(
+    num_samples,
+    data_dir,
+    csv_path="mimic-los-data.csv",
+):
+    df = pd.read_csv(data_dir / csv_path)
+    y = df.iloc[:, 0].values
+    X = df.iloc[:, 1:].values
     coef = np.linalg.pinv(X).dot(y)
     return dict(X=X[:num_samples], y=y[:num_samples], coef=coef)
 
@@ -92,18 +104,18 @@ def embed_images(img_paths, model_name="clip", device="cpu"):
     torch.cuda.empty_cache()
     return torch.cat(embeddings)
 
-
 def get_bone_data(
     num_samples,
-    img_dir="../../data/bone-age/boneage-training-dataset",
-    csv_path="../../data/bone-age/train.csv",
+    data_dir,
+    img_dir="bone-age/boneage-training-dataset",
+    csv_path="bone-age/train.csv",
     recompute_embeddings=False,
-    embedding_path="../bone_age_embeddings.pt",
+    embedding_path="bone-age/bone_age_embeddings.pt",
     device='cuda',
 ):
-    if recompute_embeddings or not Path(embedding_path).exists():
-        img_dict = {int(p.stem): p for p in Path(img_dir).glob("*.png")}
-        df = pd.read_csv(csv_path)
+    if recompute_embeddings or not Path(data_dir / embedding_path).exists():
+        img_dict = {int(p.stem): p for p in Path(data_dir / img_dir).glob("*.png")}
+        df = pd.read_csv(data_dir / csv_path)
         img_paths = []
         labels = []
         for i, r in df.iterrows():
@@ -111,9 +123,9 @@ def get_bone_data(
             labels.append(r.boneage)
         embeddings = embed_images(img_paths, device=device).numpy()
         labels = torch.tensor(labels).numpy()
-        torch.save(dict(embeddings=embeddings, labels=labels), embedding_path)
+        torch.save(dict(embeddings=embeddings, labels=labels), data_dir / embedding_path)
 
-    embed_dict = torch.load(embedding_path)
+    embed_dict = torch.load(data_dir / embedding_path)
     embeddings = embed_dict["embeddings"]
     labels = embed_dict["labels"]
 
@@ -122,6 +134,7 @@ def get_bone_data(
 
 def get_data(
     dataset="gaussian",
+    data_dir="../../data",
     scale_data=False,
     cluster=False,
     random_seed=0,
@@ -140,13 +153,16 @@ def get_data(
     recompute_embeddings=False,
 ):
     total_samples = num_seller + num_buyer + num_val
+    data_dir = Path(data_dir)
     match dataset:
         case "gaussian":
             data = get_gaussian_data(total_samples, dim=dim, noise=noise_level)
         case "news":
-            data = get_news_data(total_samples, dim=dim)
+            data = get_news_data(total_samples, data_dir=data_dir)
+        case "mimic":
+            data = get_mimic_data(total_samples, data_dir=data_dir)
         case "bone":
-            data = get_bone_data(total_samples, recompute_embeddings=recompute_embeddings)
+            data = get_bone_data(total_samples, recompute_embeddings=recompute_embeddings, data_dir=data_dir)
         case _:
             raise Exception("Dataset not found")
 
@@ -160,7 +176,7 @@ def get_data(
     X_sell, X_val, y_sell, y_val = train_test_split(
         X_dev, y_dev, test_size=num_val, random_state=random_seed
     )
-    if coef is not None:
+    if dataset == "gaussian":
         y_buy = X_buy @ coef
 
     return dict(
@@ -234,3 +250,50 @@ def get_baseline_values(
         baseline_runtimes[b] = runtime
     return baseline_values, baseline_runtimes
 
+
+def plot_errors(results, save_path):
+    plt.rcParams["font.family"] = "serif"
+    plt.figure(figsize=(8, 8))
+    errors = results["errors"]
+    eval_range = results["eval_range"]
+
+    quantiles = []
+    for i, (k, v) in enumerate(errors.items()):
+        err = np.array(v)
+        quantiles.append(np.quantile(err, 0.9))
+        ms = 5
+        match k:
+            case 'LavaEvaluator':
+                k = 'LAVA'
+            case 'InfluenceSubsample':
+                k = 'Influence'
+            case 'LeaveOneOut':
+                k = 'Leave One Out'
+            case 'KNNShapley':
+                k = 'KNN Shapley'
+            case 'DataOob':
+                k = 'Data-OOB'
+        match k:
+            case k if 'Ours' in k:
+                lw = 2
+                ls = '-'
+                marker = '*'
+                ms = ms + 5
+            case k if 'random' in k.lower():
+                lw = 5
+                ls = '-'
+                marker = ''
+            case _:
+                lw = 2
+                ls = '-'
+                marker = 's'
+        plt.plot(eval_range, err.mean(0).squeeze(), label=k, marker=marker, ls=ls, lw=lw, ms=ms)
+
+    plt.xticks(np.arange(0, max(eval_range), 10), fontsize='x-large')
+    #plt.yticks(np.arange(0, 10, 0.5), fontsize='x-large')
+    plt.ylim(0, np.median(quantiles))
+    plt.xlabel('Number of Datapoints selected', fontsize='xx-large', labelpad=8)
+    plt.ylabel('Test\nError', fontsize='xx-large', rotation=0, labelpad=30)
+    plt.legend(fontsize='xx-large', bbox_to_anchor=(0.5, 1.4), loc='upper center', ncols=2)
+    plt.tight_layout(pad=0, w_pad=0)
+    plt.savefig(save_path, bbox_inches="tight")

@@ -1,13 +1,13 @@
 import argparse
-from datetime import datetime
-import pickle
 import json
 import math
 import os
+import pickle
 import time
 import uuid
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
@@ -40,9 +40,9 @@ from torchvision.transforms import (CenterCrop, Compose, Lambda, Resize,
                                     ToTensor)
 from tqdm import tqdm
 
+import convex
 import frank_wolfe
 import utils
-import convex
 
 
 def main(args):
@@ -60,11 +60,9 @@ def main(args):
     x_val = data["X_val"].astype(np.single)
     y_val = data["y_val"]
     x_b = data["X_buy"].astype(np.single)
-    coef = data.get("coef")
-    y_b = (data["X_buy"] @ coef) if coef is not None else data["y_buy"]
-    data ["y_b"] = y_b
-    with open(args.result_dir / f'{args.uuid}-data.pkl', 'wb') as f:
-        pickle.dump(data, f)
+    y_b = data["y_buy"]
+    print(f"{x_s.shape = }".center(40, "="))
+    print(f"{x_b.shape = }".center(40, "="))
 
     errors = defaultdict(list)
     runtimes = defaultdict(list)
@@ -90,40 +88,54 @@ def main(args):
         w_fw = res_fw["weights"]
         w_os = frank_wolfe.one_step(x_s, x_test)
 
-        errors['Ours (multi-step)'].append([utils.get_error(x_test, y_test, x_s, y_s, w_fw, k) for k in eval_range])
-        errors['Ours (single step)'].append([utils.get_error(x_test, y_test, x_s, y_s, w_os, k) for k in eval_range])
+        errors["Ours (multi-step)"].append(
+            [utils.get_error(x_test, y_test, x_s, y_s, w_fw, k) for k in eval_range]
+        )
+        errors["Ours (single step)"].append(
+            [utils.get_error(x_test, y_test, x_s, y_s, w_os, k) for k in eval_range]
+        )
 
         w_baselines = utils.get_baseline_values(
-            x_s, y_s, x_val, y_val, x_val, y_val,
+            x_s,
+            y_s,
+            x_val,
+            y_val,
+            x_val,
+            y_val,
             baselines=args.baselines,
             baseline_kwargs={
-                'DataShapley': {'mc_epochs': 100, 'models_per_iteration': 10},
-                'DataBanzhaf': {'mc_epochs': 100, 'models_per_iteration': 10},
-                'BetaShapley': {'mc_epochs': 100, 'models_per_iteration': 10},
-                'DataOob': {'num_models': 100},
-                'KNNShapley': {},
-                'LavaEvaluator': {},
-                'DVRL': {'rl_epochs': 100},
-                'InfluenceSubsample': {'num_models': 100},
-                'LeaveOneOut': {},
+                "DataShapley": {"mc_epochs": 100, "models_per_iteration": 10},
+                "DataBanzhaf": {"mc_epochs": 100, "models_per_iteration": 10},
+                "BetaShapley": {"mc_epochs": 100, "models_per_iteration": 10},
+                "DataOob": {"num_models": 100},
+                "KNNShapley": {},
+                "LavaEvaluator": {},
+                "DVRL": {"rl_epochs": 100},
+                "InfluenceSubsample": {"num_models": 100},
+                "LeaveOneOut": {},
             },
-
         )
         values, times = w_baselines
 
         for k, v in values.items():
-            errors[k].append([utils.get_error(x_test, y_test, x_s, y_s, v, k) for k in eval_range])
+            errors[k].append(
+                [utils.get_error(x_test, y_test, x_s, y_s, v, k) for k in eval_range]
+            )
 
         w_rand = np.random.permutation(len(x_s))
-        errors['Random'].append([utils.get_error(x_test, y_test, x_s, y_s, w_rand, k) for k in eval_range])
+        errors["Random"].append(
+            [utils.get_error(x_test, y_test, x_s, y_s, w_rand, k) for k in eval_range]
+        )
 
         for k, v in times.items():
             runtimes[k].append(v)
 
-        print(f'round {j} done'.center(40, '='))
+        print(f"round {j} done".center(40, "="))
 
-    return dict(errors=errors, runtimes=runtimes)
+    with open(args.result_dir / f"{args.save_name}-data.pkl", "wb") as f:
+        pickle.dump(data, f)
 
+    return dict(errors=errors, eval_range=eval_range, runtimes=runtimes)
 
 
 if __name__ == "__main__":
@@ -134,14 +146,17 @@ if __name__ == "__main__":
     parser.add_argument("--random_seed", default=12345, help="random seed")
     parser.add_argument("--figure_dir", default="../figures")
     parser.add_argument("--result_dir", default="../results")
-    parser.add_argument("--dataset", default="gaussian",
-        choices=["gaussian", "news", "bone"],
+    parser.add_argument(
+        "-d",
+        "--dataset",
+        default="gaussian",
+        choices=["gaussian", "news", "mimic", "bone"],
         type=str,
         help="dataset to run experiment on",
     )
     parser.add_argument(
         "--num_buyers",
-        default=10,
+        default=30,
         type=int,
         help="number of test buyer points used in experimental design",
     )
@@ -159,7 +174,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--num_dim",
-        default=1000,
+        default=100,
         type=int,
         help="dimensionality of the data samples",
     )
@@ -173,38 +188,54 @@ if __name__ == "__main__":
         "--baselines",
         nargs="+",
         default=[
-            #"AME",
-            #"BetaShapley",
-            #"DataBanzhaf",
-            #"DataOob",
-            #"DataShapley",
-            #"DVRL",
-            #"InfluenceSubsample",
+            # "AME",
+            # "BetaShapley",
+            # "DataBanzhaf",
+            "DataOob",
+            # "DataShapley",
+            "DVRL",
+            # "InfluenceSubsample",
             "KNNShapley",
             "LavaEvaluator",
-            #"LeaveOneOut",
-            #"RandomEvaluator",
-            #"RobustVolumeShapley",
+            # "LeaveOneOut",
+            "RandomEvaluator",
+            # "RobustVolumeShapley",
         ],
         type=str,
         help="Compare to other data valution baselines in opendataval",
     )
-    parser.add_argument("-d", "--debug", action="store_true")
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     np.random.seed(args.random_seed)
     args.figure_dir = Path(args.figure_dir)
     args.result_dir = Path(args.result_dir)
     args.figure_dir.mkdir(exist_ok=True, parents=True)
     args.result_dir.mkdir(exist_ok=True, parents=True)
-    print(type(args.figure_dir))
-
-    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    random_uuid = uuid.uuid4()
-    args.uuid = f"{timestamp}"
+    if args.debug:
+        args.save_name = "debug"
+        args.num_buyers = 2
+        args.num_seller = 100
+        args.num_val = 5
+        args.num_dim = 10
+        args.num_iters = 10
+        args.baselines = ["KNNShapley", "LavaEvaluator"]
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        args.save_name = f"{args.dataset}-{args.num_seller}-{timestamp}"
     start = time.perf_counter()
-    result = main(args)
+    results = main(args)
     end = time.perf_counter()
-    print(f"Total runtime {end-start:.0f} seconds".center(40, "="))
-    with open(args.result_dir / f"{uuid}-results.json", "w") as f:
-        json.dump(result, f)
-    print(f"Results saved to {args.result_dir/{uuid}-results.json}".center(40, "="))
+    print(f"Total runtime {end-start:.0f} seconds".center(80, "="))
+    for k, v in vars(args).items():
+        if k not in results:
+            results[k] = v
+        else:
+            print(f"Found {k} in results. Skipping.")
+    result_path = args.result_dir / f"{args.save_name}-results.json"
+    with open(result_path, "w") as f:
+        json.dump(results, f, default=str)
+    print(f"Results saved to {result_path}".center(80, "="))
+
+    figure_path = args.figure_dir / f"{args.save_name}-plot.png"
+    utils.plot_errors(results, figure_path)
+    print(f"Plot saved to {figure_path}".center(80, "="))
