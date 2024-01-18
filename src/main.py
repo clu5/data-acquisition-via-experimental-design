@@ -53,27 +53,33 @@ def main(args):
         num_val=args.num_val,
         dim=args.num_dim,
         noise_level=0.1,
+        random_state=args.random_seed,
+        cost_range=args.cost_range,
+        cost_func=args.cost_func,
     )
 
     x_s = data["X_sell"].astype(np.single)
-    y_s = data["y_sell"]
+    y_s = data["y_sell"].astype(np.single)
     x_val = data["X_val"].astype(np.single)
-    y_val = data["y_val"]
+    y_val = data["y_val"].astype(np.single)
     x_b = data["X_buy"].astype(np.single)
-    y_b = data["y_buy"]
+    y_b = data["y_buy"].astype(np.single)
+    costs = data.get("costs_sell")
+
     print(f"{x_s.shape = }".center(40, "="))
     print(f"{x_b.shape = }".center(40, "="))
 
     errors = defaultdict(list)
     runtimes = defaultdict(list)
 
-    eval_range = list(range(2, 30, 1)) + list(range(20, 150, 5))
+    eval_range = list(range(2, 30, 1)) + list(range(30, 150, 5))
 
     # loop over each test point in buyer
     for j in tqdm(range(0, x_b.shape[0])):
         x_test = x_b[j : j + 1]
         y_test = y_b[j : j + 1]
 
+        w_os = frank_wolfe.one_step(x_s, x_test)
         res_fw = frank_wolfe.design_selection(
             x_s,
             y_s,
@@ -84,16 +90,22 @@ def main(args):
             alpha=None,
             recompute_interval=0,
             line_search=True,
+            costs=costs,
         )
         w_fw = res_fw["weights"]
-        w_os = frank_wolfe.one_step(x_s, x_test)
 
-        errors["Ours (multi-step)"].append(
-            [utils.get_error(x_test, y_test, x_s, y_s, w_fw, k) for k in eval_range]
+        err_kwargs = dict(
+            x_test=x_test, y_test=y_test, x_s=x_s, y_s=y_s, eval_range=eval_range
         )
-        errors["Ours (single step)"].append(
-            [utils.get_error(x_test, y_test, x_s, y_s, w_os, k) for k in eval_range]
-        )
+        if costs is not None:
+            error_func = utils.get_error_under_budget
+            err_kwargs['costs'] = costs
+        else:
+            error_func = utils.get_error_fixed
+            err_kwargs[return_list] = True
+
+        errors["Ours (single step)"].append(error_func(w=w_os, **err_kwargs))
+        errors["Ours (multi-step)"].append(error_func(w=w_fw, **err_kwargs))
 
         w_baselines = utils.get_baseline_values(
             x_s,
@@ -118,14 +130,10 @@ def main(args):
         values, times = w_baselines
 
         for k, v in values.items():
-            errors[k].append(
-                [utils.get_error(x_test, y_test, x_s, y_s, v, k) for k in eval_range]
-            )
+            errors[k].append(error_func(w=v, **err_kwargs))
 
         w_rand = np.random.permutation(len(x_s))
-        errors["Random"].append(
-            [utils.get_error(x_test, y_test, x_s, y_s, w_rand, k) for k in eval_range]
-        )
+        errors["Random"].append(error_func(w=w_rand, **err_kwargs))
 
         for k, v in times.items():
             runtimes[k].append(v)
@@ -186,7 +194,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--baselines",
-        nargs="+",
+        nargs="*",
         default=[
             # "AME",
             # "BetaShapley",
@@ -204,7 +212,26 @@ if __name__ == "__main__":
         type=str,
         help="Compare to other data valution baselines in opendataval",
     )
-    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--debug", action="store_true", help="Turn on debugging mode")
+    parser.add_argument(
+        "--cost_range",
+        nargs="*",
+        default=None,
+        help="""
+        Choose range of costs to sample uniformly.
+        E.g. costs=[1, 2, 3, 9] will randomly set each seller data point
+        to one of these costs and apply the cost_func during optimization.
+        If set to None, no cost is applied during optimization.
+        Default is None.
+        """,
+    )
+    parser.add_argument(
+        "--cost_func",
+        default="linear",
+        choices=["linear", "squared", "square_root"],
+        type=str,
+        help="Choose cost function to apply.",
+    )
     args = parser.parse_args()
     np.random.seed(args.random_seed)
     args.figure_dir = Path(args.figure_dir)
@@ -221,7 +248,10 @@ if __name__ == "__main__":
         args.baselines = ["KNNShapley", "LavaEvaluator"]
     else:
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-        args.save_name = f"{args.dataset}-{args.num_seller}-{timestamp}"
+        save_name = f"{timestamp}-{args.dataset}-{args.num_seller}"
+        if args.cost_range is not None:
+            save_name += f"-{args.cost_func}"
+        args.save_name = save_name
     start = time.perf_counter()
     results = main(args)
     end = time.perf_counter()
@@ -237,5 +267,8 @@ if __name__ == "__main__":
     print(f"Results saved to {result_path}".center(80, "="))
 
     figure_path = args.figure_dir / f"{args.save_name}-plot.png"
-    utils.plot_errors(results, figure_path)
+    if args.cost_range is not None:
+        utils.plot_errors_under_budget(results, figure_path)
+    else:
+        utils.plot_errors_fixed(results, figure_path)
     print(f"Plot saved to {figure_path}".center(80, "="))

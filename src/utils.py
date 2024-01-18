@@ -36,8 +36,6 @@ from torchvision.models import efficientnet_b1, resnet50
 from torchvision.transforms import (CenterCrop, Compose, Lambda, Resize,
                                     ToTensor)
 from tqdm import tqdm
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error
 
 
 def get_gaussian_data(num_samples=100, dim=10, noise=0.1, costs=None):
@@ -51,9 +49,11 @@ def get_gaussian_data(num_samples=100, dim=10, noise=0.1, costs=None):
     return dict(X=X, y=y, coef=coef, noise=noise, dim=dim, costs=costs)
 
 
-def get_news_data(data_dir, num_samples=100, csv_path="OnlineNewsPopularity.csv", scale=True):
+def get_news_data(
+    data_dir, num_samples=100, csv_path="OnlineNewsPopularity.csv", scale=True
+):
     df = pd.read_csv(data_dir / csv_path)
-    X = df.iloc[:, 1 : -1].values
+    X = df.iloc[:, 1:-1].values
     y = df.iloc[:, -1].values.astype(float)
     if scale:
         X = MinMaxScaler().fit_transform(X)
@@ -104,6 +104,7 @@ def embed_images(img_paths, model_name="clip", device="cpu"):
     torch.cuda.empty_cache()
     return torch.cat(embeddings)
 
+
 def get_bone_data(
     num_samples,
     data_dir,
@@ -111,7 +112,7 @@ def get_bone_data(
     csv_path="bone-age/train.csv",
     recompute_embeddings=False,
     embedding_path="bone-age/bone_age_embeddings.pt",
-    device='cuda',
+    device="cuda",
 ):
     if recompute_embeddings or not Path(data_dir / embedding_path).exists():
         img_dict = {int(p.stem): p for p in Path(data_dir / img_dir).glob("*.png")}
@@ -123,7 +124,9 @@ def get_bone_data(
             labels.append(r.boneage)
         embeddings = embed_images(img_paths, device=device).numpy()
         labels = torch.tensor(labels).numpy()
-        torch.save(dict(embeddings=embeddings, labels=labels), data_dir / embedding_path)
+        torch.save(
+            dict(embeddings=embeddings, labels=labels), data_dir / embedding_path
+        )
 
     embed_dict = torch.load(data_dir / embedding_path)
     embeddings = embed_dict["embeddings"]
@@ -132,24 +135,81 @@ def get_bone_data(
     return dict(X=embeddings[:num_samples], y=labels[:num_samples])
 
 
+def split_data(num_buyer=1, num_val=10, random_state=0, X=None, y=None, costs=None):
+    assert X is not None, "X is missing"
+    assert y is not None, "y is missing"
+    if costs is None:
+        X_dev, X_buy, y_dev, y_buy = train_test_split(
+            X,
+            y,
+            test_size=num_buyer,
+            random_state=random_state,
+        )
+        X_sell, X_val, y_sell, y_val = train_test_split(
+            X_dev,
+            y_dev,
+            test_size=num_val,
+            random_state=random_state,
+        )
+        return dict(
+            X_sell=X_sell,
+            y_sell=y_sell,
+            X_buy=X_buy,
+            y_buy=y_buy,
+            X_val=X_val,
+            y_val=y_val,
+        )
+    else:
+        X_dev, X_buy, y_dev, y_buy, costs_dev, costs_buy = train_test_split(
+            X,
+            y,
+            costs,
+            test_size=num_buyer,
+            random_state=random_state,
+        )
+        X_sell, X_val, y_sell, y_val, costs_sell, costs_val = train_test_split(
+            X_dev,
+            y_dev,
+            costs_dev,
+            test_size=num_val,
+            random_state=random_state,
+        )
+        return dict(
+            X_sell=X_sell,
+            y_sell=y_sell,
+            costs_sell=costs_sell,
+            X_buy=X_buy,
+            y_buy=y_buy,
+            costs_buy=costs_buy,
+            X_val=X_val,
+            y_val=y_val,
+            costs_val=costs_val,
+        )
+
+
+def get_cost_function(cost_func):
+    match cost_func:
+        case "square_root":
+            return lambda c: c**0.5
+        case "linear":
+            return lambda c: c**1.0
+        case "squared":
+            return lambda c: c**2.0
+        case _:
+            raise Exception(f"{_} not supported")
+
+
 def get_data(
     dataset="gaussian",
     data_dir="../../data",
-    scale_data=False,
-    cluster=False,
-    random_seed=0,
+    random_state=0,
     num_seller=10000,
     num_buyer=100,
     num_val=100,
     dim=100,
     noise_level=1,
-    buyer_subset=False,
-    num_seller_subset=0,
-    return_beta=False,
-    exponential=False,
-    n_clusters=30,
-    cost_fn=None,
-    costs=None,
+    cost_range=None,
+    cost_func="linear",
     recompute_embeddings=False,
 ):
     total_samples = num_seller + num_buyer + num_val
@@ -162,7 +222,11 @@ def get_data(
         case "mimic":
             data = get_mimic_data(total_samples, data_dir=data_dir)
         case "bone":
-            data = get_bone_data(total_samples, recompute_embeddings=recompute_embeddings, data_dir=data_dir)
+            data = get_bone_data(
+                total_samples,
+                recompute_embeddings=recompute_embeddings,
+                data_dir=data_dir,
+            )
         case _:
             raise Exception("Dataset not found")
 
@@ -170,40 +234,110 @@ def get_data(
     y = data["y"]
     coef = data.get("coef")
 
-    X_dev, X_buy, y_dev, y_buy = train_test_split(
-        X, y, test_size=num_buyer, random_state=random_seed
-    )
-    X_sell, X_val, y_sell, y_val = train_test_split(
-        X_dev, y_dev, test_size=num_val, random_state=random_seed
-    )
-    if dataset == "gaussian":
-        y_buy = X_buy @ coef
-
-    return dict(
-        X_sell=X_sell,
-        y_sell=y_sell,
-        X_val=X_val,
-        y_val=y_val,
-        X_buy=X_buy,
-        y_buy=y_buy,
-        coef=coef,
-    )
-
-
-def get_error(x_b, y_b, x_s, y_s, w, k=10, use_sklearn=False):
-    s = w.argsort()[::-1][:k]
-    x_k = x_s[s]
-    y_k = y_s[s]
-
-    if use_sklearn:
-        LR = LinearRegression(fit_intercept=False)
-        LR.fit(x_k, y_k)
-        y_hat = LR.predict(x_b)
+    if cost_range is None:
+        ret = split_data(num_buyer, num_val, random_state=random_state, X=X, y=y)
     else:
-        beta_k = np.linalg.pinv(x_k) @ y_k
-        y_hat = x_b @ beta_k
+        costs = np.random.choice(cost_range, size=X.shape[0]).astype(np.single)
+        ret = split_data(
+            num_buyer, num_val, random_state=random_state, X=X, y=y, costs=costs
+        )
 
-    return mean_squared_error(y_b, y_hat)
+    ret["coef"] = coef
+    ret["cost_range"] = cost_range
+    ret["cost_func"] = cost_func
+
+    match dataset, cost_range:
+        case "gaussian", None:  # gaussian, no costs
+            ret["y_buy"] = ret["X_buy"] @ coef
+        case _, None:  # not gaussian, no costs
+            pass
+        case "gaussian", _:  # gaussian with costs
+            h = get_cost_function(cost_func)
+            e = noise_level * np.random.randn(ret["X_sell"].shape[0])
+            print(type(ret['costs_sell']))
+            ret["y_sell"] = (
+                np.einsum("i,ij->ij", h(ret["costs_sell"]), ret["X_sell"]) @ coef + e
+            )
+            ret["y_buy"] = ret["X_buy"] @ coef
+        case _, _:  #  not gaussian with costs
+            h = get_cost_function(cost_func)
+            e = noise_level * np.random.randn(ret["X_sell"].shape[0])
+            ret["y_sell"] = ret["y_sell"] + e / h(ret["costs_sell"]) * e
+
+    return ret
+
+
+def get_error_fixed(
+    x_test,
+    y_test,
+    x_s,
+    y_s,
+    w,
+    eval_range=range(1, 10),
+    use_sklearn=False,
+    return_list=False,
+):
+    sorted_w = w.argsort()[::-1]
+
+    errors = {}
+    for k in eval_range:
+        selected = sorted_w[:k]
+        x_k = x_s[selected]
+        y_k = y_s[selected]
+
+        if use_sklearn:
+            LR = LinearRegression(fit_intercept=False)
+            LR.fit(x_k, y_k)
+            y_hat = LR.predict(x_test)
+        else:
+            beta_k = np.linalg.pinv(x_k) @ y_k
+            y_hat = x_test @ beta_k
+
+        errors[k] = mean_squared_error(y_test, y_hat)
+
+    return list(errors.values()) if return_list else errors
+
+
+def get_error_under_budget(
+    x_test,
+    y_test,
+    x_s,
+    y_s,
+    w,
+    costs=None,
+    eval_range=range(1, 10),
+    use_sklearn=False,
+    return_list=False,
+):
+    assert costs is not None, 'Missing costs'
+    sorted_w = w.argsort()[::-1]
+    cum_cost = np.cumsum(costs[sorted_w])
+
+    errors = {}
+    for budget in eval_range:
+        under_budget_index = np.searchsorted(cum_cost, budget, side="left")
+
+        # Could not find any points under budget constraint
+        if under_budget_index == 0:
+            continue
+
+        selected = sorted_w[:under_budget_index]
+        x_budget = x_s[selected]
+        y_budget = y_s[selected]
+
+        if use_sklearn:
+            LR = LinearRegression(fit_intercept=False)
+            LR.fit(x_budget, y_budget)
+            y_hat = LR.predict(x_test)
+        else:
+            beta_budget = np.linalg.pinv(x_budget) @ y_budget
+            y_hat = x_test @ beta_budget
+
+        errors[budget] = mean_squared_error(y_test, y_hat)
+
+    # Remove keys with values under budget
+    errors = {k: v for k, v in errors.items() if v is not None}
+    return list(errors.values()) if return_list else errors
 
 
 def get_baseline_values(
@@ -251,7 +385,7 @@ def get_baseline_values(
     return baseline_values, baseline_runtimes
 
 
-def plot_errors(results, save_path):
+def plot_errors_fixed(results, save_path):
     plt.rcParams["font.family"] = "serif"
     plt.figure(figsize=(8, 8))
     errors = results["errors"]
@@ -263,37 +397,114 @@ def plot_errors(results, save_path):
         quantiles.append(np.quantile(err, 0.9))
         ms = 5
         match k:
-            case 'LavaEvaluator':
-                k = 'LAVA'
-            case 'InfluenceSubsample':
-                k = 'Influence'
-            case 'LeaveOneOut':
-                k = 'Leave One Out'
-            case 'KNNShapley':
-                k = 'KNN Shapley'
-            case 'DataOob':
-                k = 'Data-OOB'
+            case "LavaEvaluator":
+                k = "LAVA"
+            case "InfluenceSubsample":
+                k = "Influence"
+            case "LeaveOneOut":
+                k = "Leave One Out"
+            case "KNNShapley":
+                k = "KNN Shapley"
+            case "DataOob":
+                k = "Data-OOB"
+            case _:
+                k = k
+
         match k:
-            case k if 'Ours' in k:
+            case k if "Ours" in k:
                 lw = 2
-                ls = '-'
-                marker = '*'
+                ls = "-"
+                marker = "*"
                 ms = ms + 5
-            case k if 'random' in k.lower():
+            case k if "random" in k.lower():
                 lw = 5
-                ls = '-'
-                marker = ''
+                ls = "-"
+                marker = ""
             case _:
                 lw = 2
-                ls = '-'
-                marker = 's'
-        plt.plot(eval_range, err.mean(0).squeeze(), label=k, marker=marker, ls=ls, lw=lw, ms=ms)
+                ls = "-"
+                marker = "s"
+        plt.plot(
+            eval_range,
+            err.mean(0).squeeze(),
+            label=k,
+            marker=marker,
+            ls=ls,
+            lw=lw,
+            ms=ms,
+        )
 
-    plt.xticks(np.arange(0, max(eval_range), 10), fontsize='x-large')
-    #plt.yticks(np.arange(0, 10, 0.5), fontsize='x-large')
+    plt.xticks(np.arange(0, max(eval_range), 10), fontsize="x-large")
+    # plt.yticks(np.arange(0, 10, 0.5), fontsize='x-large')
     plt.ylim(0, np.median(quantiles))
-    plt.xlabel('Number of Datapoints selected', fontsize='xx-large', labelpad=8)
-    plt.ylabel('Test\nError', fontsize='xx-large', rotation=0, labelpad=30)
-    plt.legend(fontsize='xx-large', bbox_to_anchor=(0.5, 1.4), loc='upper center', ncols=2)
+    plt.xlabel("Number of Datapoints selected", fontsize="xx-large", labelpad=8)
+    plt.ylabel("Test\nError", fontsize="xx-large", rotation=0, labelpad=30)
+    plt.legend(
+        fontsize="xx-large", bbox_to_anchor=(0.5, 1.4), loc="upper center", ncols=2
+    )
+    plt.tight_layout(pad=0, w_pad=0)
+    plt.savefig(save_path, bbox_inches="tight")
+
+
+def plot_errors_under_budget(results, save_path):
+    plt.rcParams["font.family"] = "serif"
+    plt.figure(figsize=(8, 8))
+    error_under_budgets = results["errors"]
+    eval_range = results["eval_range"]
+
+    quantiles = []
+    for i, (k, v) in enumerate(error_under_budgets.items()):
+        error_per_budget = defaultdict(list)
+        for v_i in v:
+            for b, e in v_i.items():
+                error_per_budget[b].append(e)
+
+        budgets = []
+        errors = []
+        for b, e in error_per_budget.items():
+            budgets.append(b)
+            errors.append(np.mean(e))
+
+        quantiles.append(np.quantile(errors, 0.9))
+        ms = 5
+        match k:
+            case "LavaEvaluator":
+                k = "LAVA"
+            case "InfluenceSubsample":
+                k = "Influence"
+            case "LeaveOneOut":
+                k = "Leave One Out"
+            case "KNNShapley":
+                k = "KNN Shapley"
+            case "DataOob":
+                k = "Data-OOB"
+            case _:
+                k = k
+
+        match k:
+            case k if "Ours" in k:
+                lw = 2
+                ls = "-"
+                marker = "*"
+                ms = ms + 5
+            case k if "random" in k.lower():
+                lw = 5
+                ls = "-"
+                marker = ""
+            case _:
+                lw = 2
+                ls = "-"
+                marker = "s"
+
+        plt.plot(budgets, errors, label=k, marker=marker, ls=ls, lw=lw, ms=ms)
+
+    plt.xticks(np.arange(0, max(eval_range), 10), fontsize="x-large")
+    # plt.yticks(np.arange(0, 10, 0.5), fontsize='x-large')
+    plt.ylim(0, np.median(quantiles))
+    plt.xlabel("Budget", fontsize="xx-large", labelpad=8)
+    plt.ylabel("Test\nError", fontsize="xx-large", rotation=0, labelpad=30)
+    plt.legend(
+        fontsize="xx-large", bbox_to_anchor=(0.5, 1.4), loc="upper center", ncols=2
+    )
     plt.tight_layout(pad=0, w_pad=0)
     plt.savefig(save_path, bbox_inches="tight")

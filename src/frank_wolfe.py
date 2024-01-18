@@ -258,8 +258,7 @@ def opt_step_size(X_sell_data, X_buy, inverse_covariance, old_loss, lower=1e-3):
 
 # One-step baseline
 def one_step(X_sell, X_buy):
-    # inv_cov = np.linalg.inv(X_sell.T @ X_sell)
-    inv_cov = np.linalg.pinv(X_sell.T @ X_sell)
+    inv_cov = np.linalg.pinv(np.dot(X_sell.T, X_sell))
     one_step_values = np.mean((X_sell @ inv_cov @ X_buy.T) ** 2, axis=1)
     return one_step_values
 
@@ -276,6 +275,7 @@ def design_selection(
     recompute_interval=50,
     early_stop_threshold=None,
     sampling_selection_error=True,
+    costs=None,
 ):
     # initialize seller weights
     n_sell = X_sell.shape[0]
@@ -293,6 +293,12 @@ def design_selection(
     coords = {}
     alphas = {}
 
+    if costs is not None:
+        err_msg = f"cost vector should have same length as seller data"
+        assert costs.shape[0] == n_sell, f"{err_msg}: should be {n_sell}"
+        err_msg = f"cost vector should be strictly positive"
+        assert (costs > 0).all(), f"{err_msg}"
+
     for i in tqdm(range(num_iters)):
         # Recomute actual inverse covariance to periodically recalibrate
         if recompute_interval > 0 and i % recompute_interval == 0:
@@ -300,6 +306,8 @@ def design_selection(
 
         # Pick coordinate with largest gradient to update
         neg_grad = compute_neg_gradient(X_sell, X_buy, inv_cov)
+        if costs is not None:
+            neg_grad *= 1 / costs
         update_coord = np.argmax(neg_grad)
 
         coords[i] = update_coord
