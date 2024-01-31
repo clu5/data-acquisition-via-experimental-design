@@ -5,7 +5,8 @@ import os
 import pickle
 import time
 import uuid
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -48,11 +49,11 @@ import utils
 def main(args):
     data = utils.get_data(
         dataset=args.dataset,
-        num_buyer=args.num_buyers,
+        num_buyer=args.num_buyers * args.batch_size,
         num_seller=args.num_seller,
         num_val=args.num_val,
         dim=args.num_dim,
-        noise_level=0.1,
+        noise_level=args.noise_level,
         random_state=args.random_seed,
         cost_range=args.cost_range,
         cost_func=args.cost_func,
@@ -68,44 +69,33 @@ def main(args):
 
     print(f"{x_s.shape = }".center(40, "="))
     print(f"{x_b.shape = }".center(40, "="))
+    if costs is not None:
+        print(f"{costs.shape = }".center(40, "="))
 
     errors = defaultdict(list)
     runtimes = defaultdict(list)
+    weights = defaultdict(list)
 
-    eval_range = list(range(2, 30, 1)) + list(range(30, 150, 5))
+    eval_range = list(range(1, 30, 1)) + list(
+        range(30, args.max_eval_range, args.eval_step)
+    )
 
     # loop over each test point in buyer
-    for j in tqdm(range(0, x_b.shape[0])):
-        x_test = x_b[j : j + 1]
-        y_test = y_b[j : j + 1]
-
-        w_os = frank_wolfe.one_step(x_s, x_test)
-        res_fw = frank_wolfe.design_selection(
-            x_s,
-            y_s,
-            x_test,
-            y_test,
-            num_select=10,
-            num_iters=args.num_iters,
-            alpha=None,
-            recompute_interval=0,
-            line_search=True,
-            costs=costs,
-        )
-        w_fw = res_fw["weights"]
+    for i, j in tqdm(enumerate(range(0, x_b.shape[0], args.batch_size))):
+        x_test = x_b[j : j + args.batch_size]
+        y_test = y_b[j : j + args.batch_size]
 
         err_kwargs = dict(
             x_test=x_test, y_test=y_test, x_s=x_s, y_s=y_s, eval_range=eval_range
         )
+
+
         if costs is not None:
             error_func = utils.get_error_under_budget
-            err_kwargs['costs'] = costs
+            err_kwargs["costs"] = costs
         else:
             error_func = utils.get_error_fixed
-            err_kwargs[return_list] = True
-
-        errors["Ours (single step)"].append(error_func(w=w_os, **err_kwargs))
-        errors["Ours (multi-step)"].append(error_func(w=w_fw, **err_kwargs))
+            err_kwargs["return_list"] = True
 
         w_baselines = utils.get_baseline_values(
             x_s,
@@ -119,31 +109,94 @@ def main(args):
                 "DataShapley": {"mc_epochs": 100, "models_per_iteration": 10},
                 "DataBanzhaf": {"mc_epochs": 100, "models_per_iteration": 10},
                 "BetaShapley": {"mc_epochs": 100, "models_per_iteration": 10},
-                "DataOob": {"num_models": 100},
-                "KNNShapley": {},
-                "LavaEvaluator": {},
-                "DVRL": {"rl_epochs": 100},
-                "InfluenceSubsample": {"num_models": 100},
-                "LeaveOneOut": {},
+                "DataOob": {"num_models": 500},
+                "InfluenceSubsample": {"num_models": 500},
             },
         )
-        values, times = w_baselines
 
+        os_start = time.perf_counter()
+        w_os = frank_wolfe.one_step(x_s, x_test)
+        os_end = time.perf_counter()
+        runtimes["Ours (single step)"].append(os_end - os_start)
+        weights["Ours (single step)"].append(w_os)
+
+        fw_start = time.perf_counter()
+        res_fw = frank_wolfe.design_selection(
+            x_s,
+            y_s,
+            x_test,
+            y_test,
+            num_select=10,
+            num_iters=args.num_iters,
+            alpha=None,
+            recompute_interval=0,
+            line_search=True,
+            costs=costs,
+            reg_lambda=args.reg_lambda,
+        )
+        fw_end = time.perf_counter()
+        w_fw = res_fw["weights"]
+        runtimes["Ours (multi-step)"].append(fw_end - fw_start)
+        weights["Ours (multi-step)"].append(w_fw)
+
+        errors["Ours (multi-step)"].append(error_func(w=w_fw, **err_kwargs))
+        errors["Ours (single step)"].append(error_func(w=w_os, **err_kwargs))
+
+        values, times = w_baselines
         for k, v in values.items():
             errors[k].append(error_func(w=v, **err_kwargs))
+            weights[k].append(v)
 
         w_rand = np.random.permutation(len(x_s))
         errors["Random"].append(error_func(w=w_rand, **err_kwargs))
+        weights["Random"].append(w_rand)
 
         for k, v in times.items():
             runtimes[k].append(v)
 
-        print(f"round {j} done".center(40, "="))
+        results = dict(errors=errors, eval_range=eval_range, runtimes=runtimes)
 
-    with open(args.result_dir / f"{args.save_name}-data.pkl", "wb") as f:
-        pickle.dump(data, f)
+        if i % 25 == 0:
+            save_results(args=args, results=results)
+            plot_results(args=args, results=results)
 
-    return dict(errors=errors, eval_range=eval_range, runtimes=runtimes)
+        print(f"round {i} done".center(40, "="))
+
+    if not args.skip_save:
+        with open(args.result_dir / f"{args.save_name}-data.pkl", "wb") as f:
+            pickle.dump(data, f)
+
+        with open(args.result_dir / f"{args.save_name}-weights.pkl", "wb") as f:
+            pickle.dump(weights, f)
+
+    save_results(args=args, results=results)
+    plot_results(args=args, results=results)
+
+    return results
+
+def save_results(args, results):
+    for k, v in vars(args).items():
+        if k not in results:
+            if isinstance(v, Path):
+                v = str(v)
+            results[k] = v
+        else:
+            print(f"Found {k} in results. Skipping.")
+
+    result_path = args.result_dir / f"{args.save_name}-results.json"
+
+    with open(result_path, "w") as f:
+        json.dump(results, f, default=float)
+    print(f"Results saved to {result_path}".center(80, "="))
+
+
+def plot_results(args, results):
+    figure_path = args.figure_dir / f"{args.save_name}-plot.png"
+    if args.cost_range is not None:
+        utils.plot_errors_under_budget(results, figure_path)
+    else:
+        utils.plot_errors_fixed(results, figure_path)
+    print(f"Plot saved to {figure_path}".center(80, "="))
 
 
 if __name__ == "__main__":
@@ -154,13 +207,26 @@ if __name__ == "__main__":
     parser.add_argument("--random_seed", default=12345, help="random seed")
     parser.add_argument("--figure_dir", default="../figures")
     parser.add_argument("--result_dir", default="../results")
+    parser.add_argument("--exp_name", default=None, type=str)
     parser.add_argument(
         "-d",
         "--dataset",
         default="gaussian",
-        choices=["gaussian", "news", "mimic", "bone"],
+        choices=[
+            "gaussian",
+            "mimic",
+            "bone",
+            "fitzpatrick",
+            "drug",
+        ],
         type=str,
         help="dataset to run experiment on",
+    )
+    parser.add_argument(
+        "--batch_size",
+        default=1,
+        type=int,
+        help="number of test points to optimize at once",
     )
     parser.add_argument(
         "--num_buyers",
@@ -193,6 +259,18 @@ if __name__ == "__main__":
         help="number of iterations to optimize experimental design",
     )
     parser.add_argument(
+        "--max_eval_range",
+        default=150,
+        type=int,
+        help="max number training points to select for evaluation",
+    )
+    parser.add_argument(
+        "--eval_step",
+        default=5,
+        type=int,
+        help="evaluation interval",
+    )
+    parser.add_argument(
         "--baselines",
         nargs="*",
         default=[
@@ -214,6 +292,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--debug", action="store_true", help="Turn on debugging mode")
     parser.add_argument(
+        "--skip_save", action="store_true", help="Don't save weights or data"
+    )
+    parser.add_argument(
         "--cost_range",
         nargs="*",
         default=None,
@@ -231,6 +312,18 @@ if __name__ == "__main__":
         choices=["linear", "squared", "square_root"],
         type=str,
         help="Choose cost function to apply.",
+    )
+    parser.add_argument(
+        "--noise_level",
+        default=0.1,
+        type=float,
+        help="level of noise to add for cost",
+    )
+    parser.add_argument(
+        "--reg_lambda",
+        default=0.0,
+        type=float,
+        help="Regularization initial inverse information matrix to be identity. Should be between 0 and 1.",
     )
     args = parser.parse_args()
     np.random.seed(args.random_seed)
@@ -251,24 +344,12 @@ if __name__ == "__main__":
         save_name = f"{timestamp}-{args.dataset}-{args.num_seller}"
         if args.cost_range is not None:
             save_name += f"-{args.cost_func}"
+        if args.exp_name is not None:
+            save_name += f"-{args.exp_name}"
         args.save_name = save_name
+
     start = time.perf_counter()
     results = main(args)
     end = time.perf_counter()
-    print(f"Total runtime {end-start:.0f} seconds".center(80, "="))
-    for k, v in vars(args).items():
-        if k not in results:
-            results[k] = v
-        else:
-            print(f"Found {k} in results. Skipping.")
-    result_path = args.result_dir / f"{args.save_name}-results.json"
-    with open(result_path, "w") as f:
-        json.dump(results, f, default=str)
-    print(f"Results saved to {result_path}".center(80, "="))
 
-    figure_path = args.figure_dir / f"{args.save_name}-plot.png"
-    if args.cost_range is not None:
-        utils.plot_errors_under_budget(results, figure_path)
-    else:
-        utils.plot_errors_fixed(results, figure_path)
-    print(f"Plot saved to {figure_path}".center(80, "="))
+    print(f"Total runtime {end-start:.0f} seconds".center(80, "="))

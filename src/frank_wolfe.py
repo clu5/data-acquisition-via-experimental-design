@@ -137,6 +137,20 @@ def measure_coverage(X_selected, X_buy):
 def evaluate_indices(
     X_sell, y_sell, X_buy, y_buy, data_indices, inverse_covariance=None
 ):
+    """
+    Evaluate the performance of selected data indices on the buyer's data.
+
+    Parameters:
+    - X_sell (numpy.ndarray): Sellers data matrix (n_sell, n_features)
+    - y_sell (numpy.ndarray): Sellers target values (n_sell,)
+    - X_buy (numpy.ndarray): Buyers data matrix (n_buy, n_features)
+    - y_buy (numpy.ndarray): Buyers target values (n_buy,)
+    - data_indices (numpy.ndarray): Indices of selected data points
+    - inverse_covariance (numpy.ndarray, optional): Inverse covariance matrix (n_features, n_features)
+
+    Returns:
+    - dict: Dictionary containing expected loss, and MSE error
+    """
     # Train a linear model from the subselected sellers data
     X_selected = X_sell[data_indices]
     coeff_hat = least_norm_linear_regression(X_selected, y_sell[data_indices])
@@ -144,11 +158,8 @@ def evaluate_indices(
     if inverse_covariance is None:
         inverse_covariance = np.linalg.pinv(X_selected.T @ X_selected)
     exp_loss = compute_exp_design_loss(X_buy, inverse_covariance)
-    # precision, recall = measure_coverage(X_selected, X_buy)
     return {
         "exp_loss": exp_loss,
-        # "precision" : precision,
-        # "recall" : recall,
         "mse_error": buy_error,
     }
 
@@ -187,7 +198,7 @@ def compute_exp_design_loss(X_buy, inverse_covariance):
     - inverse_covariance: Inverse covariance matrix of shape (d, d)
 
     Returns:
-    - loss value
+    - float: loss value
     """
 
     # Compute the matrix product E[x_0^T P x_0]
@@ -223,14 +234,16 @@ def opt_step_size(X_sell_data, X_buy, inverse_covariance, old_loss, lower=1e-3):
     Compute the optimal step size to minimize exp design loss along chosen coordinate .
 
     Parameters:
-    - X_sell_data: Sellers data being updated (d,)
+    - X_sell_data: Sellers data being updated (n_sell, d,)
     - X_buy: Buyer data matrix of shape (n_buy, d)
     - inverse_covariance: Inverse covariance matrix of shape (d, d)
     - old_loss: previous value of loss
+    - lower (float): Lower bound for the step size optimization
+
 
     Returns:
-    - optimal step size (value in [0,1])
-    - new loss
+    - float: Optimal step size (value in [0,1])
+    - float: New loss after applying the optimal step size
     """
     # OPTION I: recopmute loss for different updated inverse matrix.
     # def new_loss(alpha):
@@ -256,8 +269,16 @@ def opt_step_size(X_sell_data, X_buy, inverse_covariance, old_loss, lower=1e-3):
     return result.x, result.fun
 
 
-# One-step baseline
 def one_step(X_sell, X_buy):
+    """
+    Compute one-step baseline
+    Parameters:
+    - X_sell: Sellers data being updated (n_sell, d)
+    - X_buy: Buyer data matrix of shape (n_buy, d)
+
+    Returns:
+    - numpy.ndarray: shape (n_sell)
+    """
     inv_cov = np.linalg.pinv(np.dot(X_sell.T, X_sell))
     one_step_values = np.mean((X_sell @ inv_cov @ X_buy.T) ** 2, axis=1)
     return one_step_values
@@ -276,13 +297,43 @@ def design_selection(
     early_stop_threshold=None,
     sampling_selection_error=True,
     costs=None,
+    return_grads=False,
+    reg_lambda=0.0,
 ):
+    """
+    Select data points based on experimental design optimization.
+
+    Parameters:
+    - X_sell (numpy.ndarray): Sellers data matrix (n_sell, n_features)
+    - y_sell (numpy.ndarray): Sellers target values (n_sell,)
+    - X_buy (numpy.ndarray): Buyers data matrix (n_buy, n_features)
+    - y_buy (numpy.ndarray): Buyers target values (n_buy,)
+    - num_select (int): Number of seller data points to evaluate each step
+    - num_iters (int): Number of step iterations
+    - alpha (float, optional): Set manual step size for weight update
+    - line_search (bool): Whether to use line search for optimizing step size
+    - recompute_interval (int): Interval for recomputing the inverse covariance matrix
+    - early_stop_threshold (float, optional): Early stopping threshold for step size
+    - sampling_selection_error (bool): Whether to use sampling weights for evaluating seller indices
+    - costs (numpy.ndarray, optional): Costs associated with each seller data point
+    - use_identity (bool): Initialize inverse covariance to be the identity matrix
+
+    Returns:
+    - dict: Dictionary containing tracking information of the optimization process
+    """
+
     # initialize seller weights
     n_sell = X_sell.shape[0]
     weights = np.ones(n_sell) / n_sell
 
     # Compute inverse covariance matrix
-    inv_cov = np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell)
+    if reg_lambda > 0:
+        reg = np.eye(X_sell.shape[1]) @ np.diag(X_sell.std(0))
+        cov = X_sell.T @ np.diag(weights) @ X_sell
+        reg_cov = (1-reg_lambda) * cov + reg_lambda * reg
+        inv_cov = np.linalg.pinv(reg_cov)
+    else:
+        inv_cov = np.linalg.pinv(X_sell.T @ np.diag(weights) @ X_sell)
 
     # experimental design loss i.e. E[X_buy.T @ inv_cov @ X]
     loss = compute_exp_design_loss(X_buy, inv_cov)
@@ -292,6 +343,8 @@ def design_selection(
     errors = {}
     coords = {}
     alphas = {}
+    if return_grads:
+        grads = {}
 
     if costs is not None:
         err_msg = f"cost vector should have same length as seller data"
@@ -306,8 +359,13 @@ def design_selection(
 
         # Pick coordinate with largest gradient to update
         neg_grad = compute_neg_gradient(X_sell, X_buy, inv_cov)
+
+        if return_grads:
+            grads[i] = neg_grad
+
         if costs is not None:
             neg_grad *= 1 / costs
+
         update_coord = np.argmax(neg_grad)
 
         coords[i] = update_coord
@@ -357,10 +415,13 @@ def design_selection(
         losses[i] = compute_exp_design_loss(X_buy, inv_cov)
         errors[i] = results["mse_error"]
 
-    return dict(
+    ret = dict(
         losses=losses,
         errors=errors,
         weights=weights,
         coords=coords,
         alphas=alphas,
     )
+    if return_grads:
+        ret['grads'] = grads
+    return ret

@@ -1,7 +1,2 @@
-python main.py -d mimic --num_buyers 100 --num_seller 35000
-python main.py -d mimic --num_buyers 100 --num_seller 30000
-python main.py -d mimic --num_buyers 100 --num_seller 25000
-python main.py -d mimic --num_buyers 100 --num_seller 20000
-python main.py -d mimic --num_buyers 100 --num_seller 15000
-python main.py -d mimic --num_buyers 100 --num_seller 10000
-python main.py -d mimic --num_buyers 100 --num_seller 5000
+python main.py -d mimic --num_buyers 100 --num_seller 35000 --baselines DataOob DVRL InfluenceSubsample KNNShapley LavaEvaluator RandomEvaluator --exp_name main_table
+python main.py -d mimic --num_buyers 100 --num_seller 1000 --baselines DataOob DataShapley DVRL InfluenceSubsample KNNShapley LavaEvaluator LeaveOneOut RandomEvaluator --exp_name main_table

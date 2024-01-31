@@ -7,3 +7,4 @@ opendataval
 gpytorch
 statsmodels
 jupyterlab_vim
+transformers

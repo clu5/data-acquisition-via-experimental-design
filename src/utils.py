@@ -35,6 +35,8 @@ from torchvision.datasets import MNIST
 from torchvision.models import efficientnet_b1, resnet50
 from torchvision.transforms import (CenterCrop, Compose, Lambda, Resize,
                                     ToTensor)
+from transformers import GPT2Tokenizer, GPT2Model
+
 from tqdm import tqdm
 
 
@@ -49,28 +51,17 @@ def get_gaussian_data(num_samples=100, dim=10, noise=0.1, costs=None):
     return dict(X=X, y=y, coef=coef, noise=noise, dim=dim, costs=costs)
 
 
-def get_news_data(
-    data_dir, num_samples=100, csv_path="OnlineNewsPopularity.csv", scale=True
-):
-    df = pd.read_csv(data_dir / csv_path)
-    X = df.iloc[:, 1:-1].values
-    y = df.iloc[:, -1].values.astype(float)
-    if scale:
-        X = MinMaxScaler().fit_transform(X)
-        # y = (y - y.min()) / (y.max() - y.min())
-    # coef = np.linalg.inv(X.T.dot(X)).dot(X.T).dot(y)
-    coef = np.linalg.pinv(X).dot(y)
-    return dict(X=X[:num_samples], y=y[:num_samples], coef=coef)
-
-
 def get_mimic_data(
     num_samples,
     data_dir,
     csv_path="mimic-los-data.csv",
+    scale=True,
 ):
     df = pd.read_csv(data_dir / csv_path)
     y = df.iloc[:, 0].values
     X = df.iloc[:, 1:].values
+    if scale:
+        X = MinMaxScaler().fit_transform(X)
     coef = np.linalg.pinv(X).dot(y)
     return dict(X=X[:num_samples], y=y[:num_samples], coef=coef)
 
@@ -81,7 +72,7 @@ def embed_images(img_paths, model_name="clip", device="cpu"):
             model, preprocess = clip.load("ViT-B/32", device=device)
             inference_func = model.encode_image
         case "resnet":
-            model = resnet50(pretrained=True).to(device)
+            model = resnet18(pretrained=True).to(device)
             preprocess = Compose(
                 [
                     Resize(size=224),
@@ -104,25 +95,33 @@ def embed_images(img_paths, model_name="clip", device="cpu"):
     torch.cuda.empty_cache()
     return torch.cat(embeddings)
 
-
-def get_bone_data(
+def get_fitzpatrick_data(
     num_samples,
     data_dir,
-    img_dir="bone-age/boneage-training-dataset",
-    csv_path="bone-age/train.csv",
+    img_dir="fitzpatrick17k/images",
+    csv_path="fitzpatrick17k/fitzpatrick-mod.csv",
     recompute_embeddings=False,
-    embedding_path="bone-age/bone_age_embeddings.pt",
+    embedding_path="fitzpatrick17k/fitzpatrick_embeddings.pt",
     device="cuda",
+    model_name="clip",
 ):
-    if recompute_embeddings or not Path(data_dir / embedding_path).exists():
-        img_dict = {int(p.stem): p for p in Path(data_dir / img_dir).glob("*.png")}
+    data_dir = Path(data_dir)
+    embedding_path = Path(embedding_path)
+    embedding_name = f"{embedding_path.stem}_{model_name}{embedding_path.suffix}"
+    embedding_path = embedding_path.parent / embedding_name
+    print(f'{data_dir=}')
+    print(f'{embedding_path=}')
+    if recompute_embeddings or not (data_dir / embedding_path).exists():
+        print(f'No embeddings found at: {data_dir / embedding_path}. Creating new embeddings...')
+        img_dict = {p.stem: p for p in Path(data_dir / img_dir).glob("*.jpg")}
         df = pd.read_csv(data_dir / csv_path)
         img_paths = []
         labels = []
-        for i, r in df.iterrows():
-            img_paths.append(img_dict[r.id])
-            labels.append(r.boneage)
-        embeddings = embed_images(img_paths, device=device).numpy()
+        for k, v in img_dict.items():
+            if k in df.md5hash.values:
+                img_paths.append(v)
+                labels.append(df[df.md5hash == k].aggregated_fitzpatrick_scale.values[0])
+        embeddings = embed_images(img_paths, device=device, model_name=model_name).numpy()
         labels = torch.tensor(labels).numpy()
         torch.save(
             dict(embeddings=embeddings, labels=labels), data_dir / embedding_path
@@ -133,6 +132,98 @@ def get_bone_data(
     labels = embed_dict["labels"]
 
     return dict(X=embeddings[:num_samples], y=labels[:num_samples])
+
+
+def get_bone_data(
+    num_samples,
+    data_dir,
+    img_dir="bone-age/boneage-training-dataset",
+    csv_path="bone-age/train.csv",
+    recompute_embeddings=False,
+    embedding_path="bone-age/bone_age_embeddings.pt",
+    device="cuda",
+    model_name="clip",
+):
+    data_dir = Path(data_dir)
+    embedding_path = Path(embedding_path)
+    embedding_name = f"{embedding_path.stem}_{model_name}{embedding_path.suffix}"
+    embedding_path = embedding_path.parent / embedding_name
+    if recompute_embeddings or not (data_dir / embedding_path).exists():
+        print(f'No embeddings found at: {data_dir / embedding_path}. Creating new embeddings...')
+        img_dict = {int(p.stem): p for p in Path(data_dir / img_dir).glob("*.png")}
+        df = pd.read_csv(data_dir / csv_path)
+        img_paths = []
+        labels = []
+        for i, r in df.iterrows():
+            img_paths.append(img_dict[r.id])
+            labels.append(r.boneage)
+        embeddings = embed_images(img_paths, device=device, model_name=model_name).numpy()
+        labels = torch.tensor(labels).numpy()
+        torch.save(
+            dict(embeddings=embeddings, labels=labels), data_dir / embedding_path
+        )
+
+    embed_dict = torch.load(data_dir / embedding_path)
+    embeddings = embed_dict["embeddings"]
+    labels = embed_dict["labels"]
+
+    return dict(X=embeddings[:num_samples], y=labels[:num_samples])
+
+
+def embed_text(text_inputs:list[str], model_name='gpt2', max_length=4096, device='cuda'):
+    match model_name:
+        case "gpt2":
+            tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+            model = GPT2Model.from_pretrained(model_name).to(device)
+        case _:
+            raise Exception("Model not found")
+    embeddings = []
+    for x in tqdm(text_inputs):
+        inputs = tokenizer(x, return_tensors="pt", max_length=max_length, truncation=True).to(device)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        embeddings.append(
+            outputs.last_hidden_state.mean(dim=1).cpu()
+        )
+    return torch.cat(embeddings)
+
+def get_drug_data(
+    num_samples,
+    data_dir,
+    csv_path="druglib/druglib.csv",
+    recompute_embeddings=False,
+    embedding_path="druglib/druglib_embeddings.pt",
+    device="cuda",
+    model_name="gpt2",
+    max_length=4096,
+):
+    data_dir = Path(data_dir)
+    embedding_path = Path(embedding_path)
+    embedding_name = f"{embedding_path.stem}_{model_name}{embedding_path.suffix}"
+    embedding_path = embedding_path.parent / embedding_name
+    if recompute_embeddings or not (data_dir / embedding_path).exists():
+        print(f'No embeddings found at: {data_dir / embedding_path}. Creating new embeddings...')
+        df = pd.read_csv(data_dir / csv_path)
+        reviews = []
+        labels = []
+        for i, r in tqdm(df.iterrows()):
+            x = f'Benefits: {r.benefitsReview}\nSide effects: {r.sideEffectsReview}\nComments: {r.commentsReview}'
+            if len(x) > max_length:
+                continue
+            reviews.append(x)
+            labels.append(r.rating)
+        embeddings = embed_text(reviews, device=device).numpy()
+        labels = torch.tensor(labels).numpy()
+        torch.save(
+            dict(embeddings=embeddings, labels=labels), data_dir / embedding_path
+        )
+
+    embed_dict = torch.load(data_dir / embedding_path)
+    embeddings = embed_dict["embeddings"]
+    labels = embed_dict["labels"]
+
+    return dict(X=embeddings[:num_samples], y=labels[:num_samples])
+
 
 
 def split_data(num_buyer=1, num_val=10, random_state=0, X=None, y=None, costs=None):
@@ -187,14 +278,14 @@ def split_data(num_buyer=1, num_val=10, random_state=0, X=None, y=None, costs=No
         )
 
 
-def get_cost_function(cost_func):
+def get_cost_function(cost_func, bias=0):
     match cost_func:
         case "square_root":
-            return lambda c: c**0.5
+            return lambda c: c**0.5 + bias
         case "linear":
-            return lambda c: c**1.0
+            return lambda c: c**1.0 + bias
         case "squared":
-            return lambda c: c**2.0
+            return lambda c: c**2.0 + bias
         case _:
             raise Exception(f"{_} not supported")
 
@@ -217,15 +308,28 @@ def get_data(
     match dataset:
         case "gaussian":
             data = get_gaussian_data(total_samples, dim=dim, noise=noise_level)
-        case "news":
-            data = get_news_data(total_samples, data_dir=data_dir)
         case "mimic":
             data = get_mimic_data(total_samples, data_dir=data_dir)
+        case "fitzpatrick":
+            data = get_fitzpatrick_data(
+                total_samples,
+                recompute_embeddings=recompute_embeddings,
+                data_dir=data_dir,
+                model_name='clip',
+            )
         case "bone":
             data = get_bone_data(
                 total_samples,
                 recompute_embeddings=recompute_embeddings,
                 data_dir=data_dir,
+                model_name='clip',
+            )
+        case "drug":
+            data = get_drug_data(
+                total_samples,
+                recompute_embeddings=recompute_embeddings,
+                data_dir=data_dir,
+                model_name='gpt2',
             )
         case _:
             raise Exception("Dataset not found")
@@ -254,7 +358,7 @@ def get_data(
         case "gaussian", _:  # gaussian with costs
             h = get_cost_function(cost_func)
             e = noise_level * np.random.randn(ret["X_sell"].shape[0])
-            print(type(ret['costs_sell']))
+            print(type(ret["costs_sell"]))
             ret["y_sell"] = (
                 np.einsum("i,ij->ij", h(ret["costs_sell"]), ret["X_sell"]) @ coef + e
             )
@@ -262,7 +366,13 @@ def get_data(
         case _, _:  #  not gaussian with costs
             h = get_cost_function(cost_func)
             e = noise_level * np.random.randn(ret["X_sell"].shape[0])
-            ret["y_sell"] = ret["y_sell"] + e / h(ret["costs_sell"]) * e
+            print(f'{e[:10].round(2)=}', e.mean())
+            print(f'{ret["y_sell"][:10]}   {ret["y_sell"].mean()=}')
+            print(f'{h(ret["costs_sell"][:10])=}')
+            e *= ret["y_sell"].mean() / h(ret["costs_sell"])
+            print(f'{e[:10].round(2)=}', e.mean())
+            ret["y_sell"] = ret["y_sell"] + e
+            print(f'{ret["y_sell"].mean()=}')
 
     return ret
 
@@ -309,7 +419,7 @@ def get_error_under_budget(
     use_sklearn=False,
     return_list=False,
 ):
-    assert costs is not None, 'Missing costs'
+    assert costs is not None, "Missing costs"
     sorted_w = w.argsort()[::-1]
     cum_cost = np.cumsum(costs[sorted_w])
 
@@ -336,7 +446,7 @@ def get_error_under_budget(
         errors[budget] = mean_squared_error(y_test, y_hat)
 
     # Remove keys with values under budget
-    errors = {k: v for k, v in errors.items() if v is not None}
+    # errors = {k: v for k, v in errors.items() if v is not None}
     return list(errors.values()) if return_list else errors
 
 
@@ -461,7 +571,7 @@ def plot_errors_under_budget(results, save_path):
 
         budgets = []
         errors = []
-        for b, e in error_per_budget.items():
+        for b, e in dict(sorted(error_per_budget.items())).items():
             budgets.append(b)
             errors.append(np.mean(e))
 
