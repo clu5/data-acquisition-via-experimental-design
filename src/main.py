@@ -6,7 +6,6 @@ import pickle
 import time
 import uuid
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
