@@ -1,0 +1,1 @@
+python main.py -d gaussian --num_buyers 100 --num_dim 10 --num_val 10 --num_seller 1000 --baselines DataOob DataShapley DVRL InfluenceSubsample KNNShapley LavaEvaluator RandomEvaluator --exp_name overfit_val

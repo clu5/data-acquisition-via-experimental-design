@@ -1,0 +1,6 @@
+python main.py -d gaussian --num_buyers 100 --num_dim 10 --num_val 100 --num_seller 1000 --baselines DataOob DataShapley DVRL InfluenceSubsample KNNShapley LavaEvaluator LeaveOneOut RandomEvaluator --exp_name dim_runtime --skip_save
+python main.py -d gaussian --num_buyers 100 --num_dim 50 --num_val 100 --num_seller 1000 --baselines DataOob DVRL InfluenceSubsample KNNShapley LavaEvaluator LeaveOneOut RandomEvaluator --exp_name dim_runtime --skip_save
+python main.py -d gaussian --num_buyers 100 --num_dim 100 --num_val 100 --num_seller 1000 --baselines DataOob DVRL InfluenceSubsample KNNShapley LavaEvaluator LeaveOneOut RandomEvaluator --exp_name dim_runtime --skip_save
+python main.py -d gaussian --num_buyers 100 --num_dim 500 --num_val 100 --num_seller 1000 --baselines DataOob DVRL InfluenceSubsample KNNShapley LavaEvaluator LeaveOneOut RandomEvaluator --exp_name dim_runtime --skip_save
+python main.py -d gaussian --num_buyers 100 --num_dim 1000 --num_val 100 --num_seller 1000 --baselines DataOob DVRL InfluenceSubsample KNNShapley LavaEvaluator RandomEvaluator --exp_name dim_runtime --skip_save
+python main.py -d gaussian --num_buyers 100 --num_dim 2000 --num_val 100 --num_seller 1000 --baselines DVRL KNNShapley LavaEvaluator RandomEvaluator --exp_name dim_runtime --skip_save

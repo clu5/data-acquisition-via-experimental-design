@@ -1,4 +1,4 @@
-import argparse
+import frank_wolfe
 import json
 import math
 import os
@@ -35,8 +35,15 @@ from torchvision.datasets import MNIST
 from torchvision.models import efficientnet_b1, resnet50
 from torchvision.transforms import (CenterCrop, Compose, Lambda, Resize,
                                     ToTensor)
-from transformers import GPT2Tokenizer, GPT2Model
-
+from transformers import (
+    BertTokenizer, BertModel,
+    BertForSequenceClassification, BertConfig, 
+    GPT2Tokenizer, GPT2Model,
+    Trainer, TrainingArguments,
+)
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.metrics import mean_squared_error
+from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
@@ -170,21 +177,32 @@ def get_bone_data(
     return dict(X=embeddings[:num_samples], y=labels[:num_samples])
 
 
-def embed_text(text_inputs:list[str], model_name='gpt2', max_length=4096, device='cuda'):
+def embed_text(text_inputs :list[str], model_name='gpt2', device='cuda'):
     match model_name:
         case "gpt2":
+            print('Using GPT2 tokenizer and embedding')
             tokenizer = GPT2Tokenizer.from_pretrained(model_name)
             model = GPT2Model.from_pretrained(model_name).to(device)
+        case "bert":
+            print('Using BERT tokenizer and embedding')
+            tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+            model = BertModel.from_pretrained('bert-base-uncased').to(device)
         case _:
             raise Exception("Model not found")
+    print(tokenizer)
+    print(model)
     embeddings = []
     for x in tqdm(text_inputs):
-        inputs = tokenizer(x, return_tensors="pt", max_length=max_length, truncation=True).to(device)
+        # if len(x) > max_length:
+            # print('long text', len(x))
+        inputs = tokenizer(x, return_tensors="pt", truncation=True).to(device)
         with torch.no_grad():
             outputs = model(**inputs)
         embeddings.append(
             outputs.last_hidden_state.mean(dim=1).cpu()
         )
+        # del x, inputs, outputs
+        # torch.cuda.empty_cache()
     return torch.cat(embeddings)
 
 def get_drug_data(
@@ -192,53 +210,61 @@ def get_drug_data(
     data_dir,
     csv_path="druglib/druglib.csv",
     recompute_embeddings=False,
-    embedding_path="druglib/druglib_embeddings.pt",
+    embedding_path="druglib/druglib_embeddings_gpt2.pt",
     device="cuda",
     model_name="gpt2",
-    max_length=4096,
+    max_char_length=4096,
+    exclude_long_reviews=True,
 ):
     data_dir = Path(data_dir)
     embedding_path = Path(embedding_path)
-    embedding_name = f"{embedding_path.stem}_{model_name}{embedding_path.suffix}"
+    embedding_name = f"{embedding_path.stem}{embedding_path.suffix}"
     embedding_path = embedding_path.parent / embedding_name
     if recompute_embeddings or not (data_dir / embedding_path).exists():
         print(f'No embeddings found at: {data_dir / embedding_path}. Creating new embeddings...')
         df = pd.read_csv(data_dir / csv_path)
         reviews = []
         labels = []
+        index = []
         for i, r in tqdm(df.iterrows()):
             x = f'Benefits: {r.benefitsReview}\nSide effects: {r.sideEffectsReview}\nComments: {r.commentsReview}'
-            if len(x) > max_length:
+            if exclude_long_reviews and len(x) > max_char_length:
                 continue
             reviews.append(x)
             labels.append(r.rating)
-        embeddings = embed_text(reviews, device=device).numpy()
+            index.append(i)
+        embeddings = embed_text(reviews, device=device, model_name=model_name).numpy()
         labels = torch.tensor(labels).numpy()
         torch.save(
-            dict(embeddings=embeddings, labels=labels), data_dir / embedding_path
+            dict(embeddings=embeddings, labels=labels, index=index), data_dir / embedding_path
         )
 
     embed_dict = torch.load(data_dir / embedding_path)
     embeddings = embed_dict["embeddings"]
     labels = embed_dict["labels"]
+    index = embed_dict["index"]
 
-    return dict(X=embeddings[:num_samples], y=labels[:num_samples])
+    return dict(X=embeddings[:num_samples], y=labels[:num_samples], index=index[:num_samples])
 
 
 
-def split_data(num_buyer=1, num_val=10, random_state=0, X=None, y=None, costs=None):
+def split_data(num_buyer=1, num_val=10, random_state=0, X=None, y=None, index=None, costs=None):
     assert X is not None, "X is missing"
     assert y is not None, "y is missing"
+    if index is None:
+        index = np.arange(len(X))
     if costs is None:
-        X_dev, X_buy, y_dev, y_buy = train_test_split(
+        X_dev, X_buy, y_dev, y_buy, index_dev, index_buy = train_test_split(
             X,
             y,
+            index,
             test_size=num_buyer,
             random_state=random_state,
         )
-        X_sell, X_val, y_sell, y_val = train_test_split(
+        X_sell, X_val, y_sell, y_val, index_sell, index_val = train_test_split(
             X_dev,
             y_dev,
+            index_dev,
             test_size=num_val,
             random_state=random_state,
         )
@@ -249,19 +275,24 @@ def split_data(num_buyer=1, num_val=10, random_state=0, X=None, y=None, costs=No
             y_buy=y_buy,
             X_val=X_val,
             y_val=y_val,
+            index_sell=index_sell,
+            index_buy=index_buy,
+            index_val=index_val,
         )
     else:
-        X_dev, X_buy, y_dev, y_buy, costs_dev, costs_buy = train_test_split(
+        X_dev, X_buy, y_dev, y_buy, costs_dev, costs_buy, index_dev, index_buy = train_test_split(
             X,
             y,
             costs,
+            index,
             test_size=num_buyer,
             random_state=random_state,
         )
-        X_sell, X_val, y_sell, y_val, costs_sell, costs_val = train_test_split(
+        X_sell, X_val, y_sell, y_val, costs_sell, costs_val, index_sell, index_val = train_test_split(
             X_dev,
             y_dev,
             costs_dev,
+            index_dev,
             test_size=num_val,
             random_state=random_state,
         )
@@ -275,6 +306,9 @@ def split_data(num_buyer=1, num_val=10, random_state=0, X=None, y=None, costs=No
             X_val=X_val,
             y_val=y_val,
             costs_val=costs_val,
+            index_buy=index_buy,
+            index_val=index_val,
+            index_sell=index_sell,
         )
 
 
@@ -337,13 +371,14 @@ def get_data(
     X = data["X"]
     y = data["y"]
     coef = data.get("coef")
+    index = data.get("index")
 
     if cost_range is None:
-        ret = split_data(num_buyer, num_val, random_state=random_state, X=X, y=y)
+        ret = split_data(num_buyer, num_val, random_state=random_state, X=X, y=y, index=index)
     else:
         costs = np.random.choice(cost_range, size=X.shape[0]).astype(np.single)
         ret = split_data(
-            num_buyer, num_val, random_state=random_state, X=X, y=y, costs=costs
+            num_buyer, num_val, random_state=random_state, X=X, y=y, costs=costs, index=index,
         )
 
     ret["coef"] = coef
@@ -618,3 +653,243 @@ def plot_errors_under_budget(results, save_path):
     )
     plt.tight_layout(pad=0, w_pad=0)
     plt.savefig(save_path, bbox_inches="tight")
+
+
+class TextDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx, return_tensor=None, device=None):
+        item = self.tokenizer(
+            self.texts[idx], 
+            truncation=True, 
+            padding='max_length', 
+            return_tensors=return_tensor,
+        )
+        item['labels'] = torch.tensor(self.labels[idx], dtype=torch.float32) 
+        if device is not None:
+            item = {k: v.to(device) for k, v in item.items()}
+        return item
+        
+
+class GPT2Regressor(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gpt2 = GPT2Model.from_pretrained('gpt2')
+        self.regressor = torch.nn.Linear(self.gpt2.config.n_embd, 1)
+        self.loss_fn = torch.nn.MSELoss()  
+
+    def forward(self, input_ids, attention_mask=None, labels=None, **kwargs):
+        outputs = self.gpt2(input_ids=input_ids, attention_mask=attention_mask)
+        hidden_states = outputs.last_hidden_state
+        x_last = hidden_states[:, -1, :]
+        logits = self.regressor(x_last)
+        
+        if labels is not None:
+            # Calculate loss if labels are provided
+            loss = self.loss_fn(logits.view(-1), labels.view(-1))  # Ensure correct shape
+            return {"loss": loss, "logits": logits}
+        
+        return {"logits": logits}
+
+def compute_metrics(eval_pred):
+    predictions, labels = eval_pred
+    predictions = predictions[:, 0]  # Model outputs logits for each class; take the first for regression
+    return {"mse": mean_squared_error(labels, predictions)}
+
+
+def run_exp(
+        num_buyer = 10,
+        num_samples = 1000,
+        Ks = [2, 5, 10, 25, 50],
+        epochs = 10,
+        num_iters = 500,
+        model_name = 'gpt2',
+        # model_name = 'bert',
+        lr = 5e-5,
+        batch_size = 1,
+        grad_steps = 1,
+        weight_decay = 0.01,
+        max_char_length=2048,
+        exclude_long_reviews=False,
+        data_dir='../../data',
+        csv_path="druglib/druglib.csv",
+    ):
+    df = pd.read_csv(Path(data_dir) / csv_path)
+    reviews = []
+    labels = []
+    for i, r in tqdm(df.iterrows()):
+        x = f'Benefits: {r.benefitsReview}\nSide effects: {r.sideEffectsReview}\nComments: {r.commentsReview}'
+        if exclude_long_reviews and len(x) > max_char_length:
+            continue
+        reviews.append(x)
+        labels.append(r.rating)
+    print(f'Total: {len(reviews)}')
+    print(model_name.upper().center(40, '='))
+    data = get_drug_data(
+        num_samples=num_samples,
+        data_dir='../../data',
+        csv_path="druglib/druglib.csv",
+        embedding_path=f"druglib/druglib_embeddings_{model_name}.pt",
+        device="cuda",
+        model_name=model_name,
+        max_char_length=max_char_length,
+        # recompute_embeddings=True,
+    )
+    data_part = split_data(num_buyer=num_buyer, num_val=1, X=data['X'], y=data['y'], index=np.arange(data['X'].shape[0]))
+    
+    probe_design_mse = {}
+    probe_random_mse = {}
+    finetune_design_mse = {}
+    finetune_random_mse = {}
+    for j in range(num_buyer):
+        results = frank_wolfe.design_selection(
+            data_part['X_sell'],
+            data_part['y_sell'],
+            data_part['X_buy'][j:j+1],
+            data_part['y_buy'][j:j+1],
+            num_select=10,
+            num_iters=num_iters,
+            alpha=None,
+            recompute_interval=0,
+            line_search=True,
+            costs=None,
+            reg_lambda=0,
+        )
+        eval_range = list(range(1, 200, 1))
+        w = results['weights']
+        probe_design_mse[j] = get_error_fixed(
+            data_part['X_buy'][j:j+1],
+            data_part['y_buy'][j:j+1],
+            data_part['X_sell'],
+            data_part['y_sell'],
+            w=w,
+            eval_range = eval_range,
+        )
+        n = w.shape[0]
+        probe_random_mse[j] = get_error_fixed(
+            data_part['X_buy'][j:j+1],
+            data_part['y_buy'][j:j+1],
+            data_part['X_sell'],
+            data_part['y_sell'],
+            w=np.random.choice(n, size=n, replace=False),
+            eval_range = eval_range,
+        )
+    
+        design_finetune = {}
+        random_finetune = {}
+        for K in Ks:
+            print(str(K).center(40, '='))
+            if model_name == 'bert':
+                print('bert'.center(40, '-'))
+                tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+                config = BertConfig.from_pretrained('bert-base-uncased', num_labels=1)
+                model = BertForSequenceClassification.from_pretrained('bert-base-uncased', config=config)
+                rand_model = BertForSequenceClassification.from_pretrained('bert-base-uncased', config=config)
+            
+            elif model_name == 'gpt2':
+                print('gpt2'.center(40, '-'))
+                tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+                tokenizer.pad_token = tokenizer.eos_token
+                model = GPT2Regressor()
+                rand_model = GPT2Regressor()
+            else:
+                raise ValueError(f'{model_name} model not found')
+        
+            selected = w.argsort()[::-1][:K]
+        
+            orig_sell_index = np.array(data_part['index_sell'])[selected]
+            orig_buy_index = np.array(data_part['index_buy'])
+            train_ds = TextDataset(
+                [reviews[i] for i in orig_sell_index], [labels[i] for i in orig_sell_index], 
+                tokenizer,
+            )
+            eval_ds = TextDataset(
+                [reviews[orig_buy_index[j]]], [labels[orig_buy_index[j]]],
+                tokenizer,
+            )
+            # random_index = np.random.choice(len(reviews), size=K, replace=False)
+            random_index = np.arange(K)
+            rand_ds = TextDataset(
+                [reviews[i] for i in random_index], [labels[i] for i in random_index], 
+                tokenizer,
+            )
+            
+            training_args = TrainingArguments(
+                output_dir='temp',
+                evaluation_strategy='epoch',
+                save_strategy='no',
+                logging_strategy='epoch',
+                logging_steps=1, 
+                learning_rate=lr,
+                per_device_train_batch_size=1,
+                num_train_epochs=epochs,
+                gradient_accumulation_steps=grad_steps,
+                weight_decay=weight_decay,
+            )
+            
+            trainer = Trainer(
+                model=model,
+                args=training_args,
+                train_dataset=train_ds,
+                eval_dataset=eval_ds,
+                compute_metrics=compute_metrics,
+            )
+            # trainer.add_callback(CustomLRScheduler())
+            trainer.train()
+            # trainer.evaluate()
+    
+            output = model(**eval_ds.__getitem__(0, return_tensor='pt', device='cuda'))
+            logit = output['logits'].cpu().detach()
+            lab = eval_ds[0]['labels'].unsqueeze(0)
+            mse = mean_squared_error(
+                lab,
+                logit
+            )
+            design_finetune[K] = mse
+            
+            print(j, f"LABEL: {data_part['y_buy'][j:j+1]} {lab}")
+            print(f'PRED: {logit}')
+            print(f'MSE: {mse:.4f}')
+        
+            rand_trainer = Trainer(
+                model=rand_model,
+                args=training_args,
+                train_dataset=rand_ds,
+                eval_dataset=eval_ds,
+                compute_metrics=compute_metrics,
+            )
+            # rand_trainer.add_callback(CustomLRScheduler())
+            rand_trainer.train()
+            
+            rand_output = rand_model(**eval_ds.__getitem__(0, return_tensor='pt', device='cuda'))
+            rand_logit = rand_output['logits'].cpu().detach()
+            lab = eval_ds[0]['labels'].unsqueeze(0)
+            rand_mse = mean_squared_error(
+                lab,
+                rand_logit
+            )
+            random_finetune[K] = rand_mse
+            print(j, f"LABEL: {data_part['y_buy'][j:j+1]} {lab}")
+            print(f'RANDOM PRED: {rand_logit}')
+            print(f'RANDOM MSE: {rand_mse:.4f}')
+            
+            del model
+            del rand_model
+            torch.cuda.empty_cache()
+            
+        finetune_design_mse[j] = design_finetune
+        finetune_random_mse[j] = random_finetune
+
+    results = dict(
+        probe_design_mse=probe_design_mse,
+        probe_random_mse=probe_random_mse,
+        finetune_design_mse=finetune_design_mse,
+        finetune_random_mse=finetune_random_mse,
+    )
+    return results

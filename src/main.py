@@ -66,6 +66,9 @@ def main(args):
     x_b = data["X_buy"].astype(np.single)
     y_b = data["y_buy"].astype(np.single)
     costs = data.get("costs_sell")
+    index_s = data['index_sell']
+    index_b = data['index_buy']
+    index_v = data['index_val']
 
     print(f"{x_s.shape = }".center(40, "="))
     print(f"{x_b.shape = }".center(40, "="))

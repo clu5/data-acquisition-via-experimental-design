@@ -1,3 +1,4 @@
+accelerate
 jupyterlab
 scipy==1.10
 scikit-learn
